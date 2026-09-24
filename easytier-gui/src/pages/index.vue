@@ -255,6 +255,10 @@ onMounted(async () => {
   cleanupFns.push(await listenGlobalEvents())
   currentMode.value = loadMode()
   await initWithMode(currentMode.value);
+  if (type() === 'android') {
+    try { await setLoggingLevel(current_log_level) }
+    catch (error) { console.error('restore Android logging level failed', error) }
+  }
 
   if (type() === 'android') {
     setMobileVpnTileActionHandler(handleMobileVpnTileAction)
@@ -356,7 +360,10 @@ onMounted(async () => {
   }, 1000)
 })
 
-let current_log_level = 'off'
+const savedMobileLogLevel = localStorage.getItem('mobile_log_level') ?? 'info'
+let current_log_level = type() === 'android'
+  ? (['off', 'warn', 'info', 'debug', 'trace'].includes(savedMobileLogLevel) ? savedMobileLogLevel : 'info')
+  : 'off'
 
 const log_menu = ref()
 // 从后端获取正确的日志路径
@@ -368,8 +375,9 @@ const log_menu_items_popup: Ref<MenuItem[]> = ref([
   ...['off', 'warn', 'info', 'debug', 'trace'].map(level => ({
     label: () => t(`logging_level_${level}`) + (current_log_level === level ? ' ✓' : ''),
     command: async () => {
-      current_log_level = level
       await setLoggingLevel(level)
+      current_log_level = level
+      if (type() === 'android') localStorage.setItem('mobile_log_level', level)
     },
   })),
   {

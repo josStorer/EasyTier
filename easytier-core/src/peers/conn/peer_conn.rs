@@ -1170,7 +1170,8 @@ impl PeerConn {
     }
 
     fn build_handshake_rsp(&self, noise: &NoiseHandshakeResult) -> HandshakeRequest {
-        tracing::info!("build_handshake_rsp: {:?}", noise);
+        // NoiseHandshakeResult contains root keys and authentication proofs.
+        tracing::info!(peer_id = noise.peer_id, "building handshake response");
         HandshakeRequest {
             magic: MAGIC,
             my_peer_id: noise.peer_id,

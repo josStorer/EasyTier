@@ -11,7 +11,23 @@
 - 物理网络丢失时显示等待网络；Wi-Fi/移动网络切换后合并短时间内的事件，重建核心连接和 VPN。手动停止后不执行这条恢复路径。
 - 主界面显示配置等待、地址等待、授权、VPN 启动、节点连接、网络等待、重连、错误和重试次数。启动重试最多 60 次，每次间隔 2 秒；单次 VPN 启动等待上限 10 秒，核心接入等待上限 5 秒。
 
-“VPN 已建立，节点已连接”表示 VPN 和节点状态正常，不代表某个 HTTP 服务已通过探测。本次保留现有路由和子网代理方式：访问远端局域网 HTTP 仍需要对端正确配置子网代理、HTTP 监听地址及防火墙。
+“VPN 已建立，心跳和路由正常”需要有成功心跳、非完全丢包、近期接收计数以及可达的非本机路由；只有握手成功不会显示此状态。它不代表某个 HTTP 服务已通过探测。本次保留现有路由和子网代理方式：访问远端局域网 HTTP 仍需要对端正确配置子网代理、HTTP 监听地址及防火墙。
+
+## 持续异常恢复和诊断日志
+
+- 持续 45 秒无法确认心跳或路由时，关闭 Android VPN，等待旧核心实例清理完成，再重建实例及 VPN。恢复直接调用本地实例管理器，避开短时 RPC 请求超时后旧清理仍在执行的问题；使用管理 RPC 共用的互斥锁防止重叠。保留实例配置来源、文件权限、其他 no-TUN 实例和配置服务器会话。
+- 每轮最多自动恢复 3 次，恢复开始间隔至少为 45、90 秒（第三次后的冷却为 180 秒）；两分钟持续健康或手动连接才重置预算。收包停滞检测允许 75 秒空闲，以容纳核心最长 32 秒的心跳间隔。无网络和前端长时间暂停不计入连续故障时间。
+- 最后一次恢复后仍等待 45 秒再显示次数耗尽；耗尽后继续观察自然恢复，但不再自动重建。清理或重建调用失败会保持错误，等待手动重试。
+- 清理超过 10 秒显示等待提示，后端每 5 秒记录清理耗时。不能强制取消清理后同时创建新实例；如果清理一直无法完成，需导出日志后重新启动 App。手动停止会立即取消后续启动意图。
+- 这不是操作系统进程重启，也不证明日志中全部故障均由同一原因引起；后台 WebView 被系统暂停时，前端健康监控也会暂停。
+
+安卓版默认启用 Info 文件日志，按 5 MiB 轮转，使用 3 份轮转保留配置。日志菜单选择的级别会保存，重启后恢复；选择 Off 会在界面初始化后关闭日志，启动最早阶段仍可能有少量 Info 日志。Debug 可以用于短时间复现，不建议长期使用 Trace。
+
+新增日志使用 `mobile_vpn` 标识，包括进程 PID、界面会话 UUID、连接代次、实例 ID、VPN fd、物理网络 ID、阶段、健康节点/路由数和恢复次数。每 15 秒记录一份健康快照，最多包含 8 个节点（每节点 2 条连接）的延迟、丢包率、收发计数，以及 8 条路由的下一跳和版本；状态变化、权限结果、TUN 接入、恢复和停止另有事件。恢复前会立即记录快照。
+
+复现时先保留失败现场，导出 `easytier.log` 及同目录中对应时段的轮转日志，记录手机当地时间、访问的目标 HTTP 地址、当前 Wi-Fi/蜂窝和界面状态。日志时间为 UTC（北京时间减 8 小时）。成功恢复后再导出一次，便于对比同一次会话的前后状态。先查 `mobile_vpn` 的 `reason`、`peer_details` 和 `route_details`，再对照核心的心跳、路由同步、TCP/KCP 日志。
+
+新增诊断不记录配置 URL、密钥或 HTTP 内容，并去掉了原握手响应中直接输出密钥材料的日志。上游其他 Debug/Trace 日志仍可能包含敏感信息，分享日志前应检查。
 
 ## 与上游问题的关系
 
@@ -30,8 +46,8 @@
 
 已通过：
 
-- 34 项 Vitest 连接/授权/重试/停止/切网/配置迁移模拟测试。
-- 1 项真实 Vue + PrimeVue 控件测试：新增、长名称编辑、URL 编辑、下拉切换、删除、保存后重新加载。
+- 42 项 Vitest 连接/授权/重试/停止/切网/配置迁移及健康恢复模拟测试，包含恢复次数上限、清理期间停止、状态查询失败、恢复失败后手动重试、空闲心跳和收包停滞。
+- 2 项真实 Vue + PrimeVue 控件测试：配置新增、长名称编辑、URL 编辑、下拉切换、删除、保存后重新加载；恢复期间停止、错误后重试以及 HTTP 未验证提示。
 - GUI 正式生产构建（包含共享前端库和 TypeScript 检查）。
 - `cargo +1.95.0 check -p easytier-gui --lib --locked`，Windows 目标；仅此检查通过环境变量跳过 Windows 打包资源，没有改动资源配置。
 - Rust 连接意图失效测试。
@@ -43,7 +59,7 @@
 pnpm install --frozen-lockfile
 pnpm --filter easytier-gui build
 pnpm --filter easytier-gui test:mobile-vpn
-pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts
+pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts tests/gui-mobile-status.spec.ts
 rustc --edition 2024 --test easytier-gui/src-tauri/src/connection_intent.rs -o connection-intent-tests
 ./connection-intent-tests
 ```

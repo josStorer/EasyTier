@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMobileHealth, sampleMobileHealth } from './mobile_health'
 
 const mocks = vi.hoisted(() => {
   const listeners = new Map<string, (payload: unknown) => Promise<void>>()
@@ -21,7 +22,7 @@ const mocks = vi.hoisted(() => {
     listNetworkInstanceIds: vi.fn<() => Promise<{ running_inst_ids: unknown[] }>>(async () => ({ running_inst_ids: [] })),
     prepareVpn: vi.fn(async () => ({ granted: true })),
     setTunFd: vi.fn(async () => undefined),
-    restartMobileNetwork: vi.fn(async () => undefined),
+    restartMobileNetwork: vi.fn<() => Promise<void>>(async () => undefined),
     startVpn: vi.fn(async (_request: Record<string, unknown>) => {
       await listeners.get('vpn_service_start')?.({ fd: 1 })
       return {}
@@ -53,6 +54,7 @@ vi.mock('tauri-plugin-vpnservice-api', () => ({
 }))
 
 vi.mock('./backend', () => ({
+  logMobileVpnDiagnostic: vi.fn(async () => undefined),
   collectNetworkInfo: mocks.collectNetworkInfo,
   getConfig: mocks.getConfig,
   listNetworkInstanceIds: mocks.listNetworkInstanceIds,
@@ -387,6 +389,80 @@ describe('mobile VPN recovery and cancellation', () => {
     expect(mocks.restartMobileNetwork).not.toHaveBeenCalled()
   })
 
+  it('recovers persistent handshake-only connections at most three times', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: ['A'] })
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    for (let i = 0; i < 180; i++) {
+      await vpn.refreshMobileVpnStatus()
+      await vi.advanceTimersByTimeAsync(2000)
+    }
+    expect(mocks.restartMobileNetwork).toHaveBeenCalledTimes(3)
+    expect(vpn.mobileVpnState.phase).toBe('error')
+    expect(vpn.mobileVpnState.error).toBe('recovery_exhausted')
+  })
+
+  it('keeps a failed recovery visible until an explicit retry', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: ['A'] })
+    mocks.restartMobileNetwork.mockRejectedValueOnce(new Error('cleanup failed'))
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    for (let i = 0; i < 35; i++) {
+      await vpn.refreshMobileVpnStatus()
+      await vi.advanceTimersByTimeAsync(2000)
+    }
+    await vpn.onNetworkInstanceUpdate('A')
+    expect(vpn.mobileVpnState.error).toBe('recovery_failed')
+    expect(mocks.startVpn).toHaveBeenCalledOnce()
+    vpn.resumeMobileVpn()
+    await vpn.syncMobileVpnService()
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+  })
+
+  it('counts failed status queries toward recovery without exposing raw errors', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.collectNetworkInfo.mockRejectedValue(new Error('RPC timeout with sensitive URL'))
+    for (let i = 0; i < 23; i++) {
+      await vpn.refreshMobileVpnStatus()
+      await vi.advanceTimersByTimeAsync(2000)
+    }
+    expect(vpn.mobileVpnState.error).toBe('network_info_unavailable')
+    await vpn.refreshMobileVpnStatus()
+    expect(mocks.restartMobileNetwork).toHaveBeenCalledOnce()
+    mocks.collectNetworkInfo.mockReset().mockImplementation(async instanceId => ({
+      info: { map: { [instanceId]: mocks.networkInfo.get(instanceId) } },
+    }))
+  })
+
+  it('does not attach a new VPN after stop during core recovery', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: ['A'] })
+    let release!: () => void
+    mocks.restartMobileNetwork.mockImplementation(() => new Promise<void>(resolve => { release = resolve }))
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    for (let i = 0; i < 23; i++) {
+      await vpn.refreshMobileVpnStatus()
+      await vi.advanceTimersByTimeAsync(2000)
+    }
+    const recovery = vpn.refreshMobileVpnStatus()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.restartMobileNetwork).toHaveBeenCalledOnce()
+    await vpn.suspendMobileVpn()
+    release()
+    await recovery
+    expect(mocks.startVpn).toHaveBeenCalledOnce()
+    expect(vpn.mobileVpnState.phase).toBe('stopped')
+  })
+
   it('honors a pending tile stop over a simultaneous launcher start', async () => {
     const vpn = await loadVpnModule()
     const handler = vi.fn(async () => undefined)
@@ -394,5 +470,55 @@ describe('mobile VPN recovery and cancellation', () => {
     mocks.consumeVpnTileAction.mockResolvedValue({ action: 'stop', launchRequested: true })
     await vpn.consumePendingMobileVpnTileAction()
     expect(handler).toHaveBeenCalledWith('stop')
+  })
+})
+
+describe('mobile heartbeat and route health', () => {
+  function network(latency = 22000, loss = 0) {
+    return {
+      my_node_info: { peer_id: 1 },
+      peers: [{ peer_id: 2, conns: [{ conn_id: 'conn', loss_rate: loss,
+        stats: { latency_us: latency, rx_packets: 2, tx_packets: 2, rx_bytes: 100, tx_bytes: 100 } }] }],
+      routes: [{ peer_id: 3, next_hop_peer_id: 2, cost: 2 }],
+    }
+  }
+
+  it('requires a heartbeat and a reachable non-self route', () => {
+    const state = createMobileHealth()
+    expect(sampleMobileHealth(state, network(0), 1000).reason).toBe('waiting_heartbeat')
+    expect(sampleMobileHealth(state, network(22000, 1), 2000).healthy).toBe(false)
+    expect(sampleMobileHealth(state, { ...network(), routes: [] }, 3000).reason).toBe('waiting_routes')
+    expect(sampleMobileHealth(state, { ...network(), routes: [{ peer_id: 1, next_hop_peer_id: 2, cost: 0 }] }, 4000).healthy).toBe(false)
+    expect(sampleMobileHealth(state, network(), 5000).healthy).toBe(true)
+  })
+
+  it('allows idle 32-second heartbeats but detects frozen counters', () => {
+    const state = createMobileHealth()
+    for (let now = 1000; now < 76000; now += 2000) {
+      expect(sampleMobileHealth(state, network(), now).healthy).toBe(true)
+    }
+    expect(sampleMobileHealth(state, network(), 77000).reason).toBe('waiting_heartbeat')
+    const fresh = network()
+    fresh.peers[0].conns[0].stats.rx_packets++
+    expect(sampleMobileHealth(state, fresh, 79000).healthy).toBe(true)
+  })
+
+  it('does not charge time spent suspended and prunes old connections', () => {
+    const state = createMobileHealth()
+    sampleMobileHealth(state, network(0), 1000)
+    expect(sampleMobileHealth(state, network(0), 100000).recover).toBe(false)
+    sampleMobileHealth(state, undefined, 102000)
+    expect(state.samples.size).toBe(0)
+  })
+
+  it('only resets the recovery budget after two minutes of sustained health', () => {
+    const state = createMobileHealth()
+    state.recoveries = 3
+    for (let now = 1000; now <= 121000; now += 2000) {
+      const info = network()
+      info.peers[0].conns[0].stats.rx_packets = now
+      sampleMobileHealth(state, info, now)
+      expect(state.recoveries).toBe(now < 121000 ? 3 : 0)
+    }
   })
 })

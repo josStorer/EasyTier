@@ -103,6 +103,16 @@ export function restartMobileNetwork() {
   return invoke<void>('restart_mobile_network')
 }
 
+export function logMobileVpnDiagnostic(snapshot: {
+  session: string, generation: number, instanceId?: string, phase: string,
+  reason: string, peers: number, routes: number, recovery: number,
+  networkId?: string | null, nativeRunning?: boolean, fd?: number,
+  peerDetails?: { peerId: number, connId: string, latencyUs: number, lossRate: number, rxPackets: string, txPackets: string }[],
+  routeDetails?: { peerId: number, nextHop: number, cost: number, version: string }[],
+}) {
+  return invoke<void>('log_mobile_vpn_diagnostic', { snapshot })
+}
+
 export async function getEasytierVersion() {
   return await invoke<string>('easytier_version')
 }

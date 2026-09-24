@@ -94,7 +94,16 @@ mobile-vpn:
   address: 正在等待虚拟 IP
   starting: 正在建立系统 VPN
   connecting: VPN 已建立，等待节点连接
-  connected: VPN 已建立，节点已连接
+  connected: VPN 已建立，心跳和路由正常
+  checking: VPN 已建立，正在检查连通性
+  recovering: 正在清理旧连接并重建 VPN
+  waiting_heartbeat: 节点尚无有效心跳，或已持续丢包。持续异常将尝试恢复。
+  waiting_routes: 心跳正常，尚未收到可达节点的路由。持续异常将尝试恢复。
+  recovery_exhausted: 已尝试恢复 3 次，仍未确认连通性。请导出日志检查，也可手动重试。
+  recovery_failed: 连接重建失败，请导出日志检查或手动重试。
+  recovery_slow: 旧连接清理耗时较长，正在等待退出。可点击停止取消后续启动。
+  health_progress: '可达路由：{routes} · 自动恢复：{count} / 3'
+  http_unverified: 此状态表示隧道心跳和路由正常，尚未验证目标 HTTP 服务。
   waiting_network: 等待手机网络恢复
   reconnecting: 网络已切换，正在重新连接
   error: 连接遇到问题

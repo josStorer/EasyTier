@@ -37,6 +37,10 @@ async function stop() {
     <div v-if="mobileVpnState.attempt" class="text-sm">
       {{ t('mobile-vpn.retry_progress', { count: mobileVpnState.attempt, max: 60 }) }}
     </div>
+    <div v-if="mobileVpnState.enabled" class="text-sm">
+      {{ t('mobile-vpn.health_progress', { routes: mobileVpnState.routes, count: mobileVpnState.recovery }) }}
+    </div>
+    <small v-if="mobileVpnState.phase === 'connected'">{{ t('mobile-vpn.http_unverified') }}</small>
     <div v-if="mobileVpnState.error" role="alert" class="text-sm text-red-600 dark:text-red-400 break-all max-h-24 overflow-y-auto">
       {{ te('mobile-vpn.' + mobileVpnState.error) ? t('mobile-vpn.' + mobileVpnState.error) : mobileVpnState.error }}
     </div>

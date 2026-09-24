@@ -17,6 +17,7 @@ declare global {
   const computed: typeof import('vue')['computed']
   const consumePendingMobileVpnTileAction: typeof import('./composables/mobile_vpn')['consumePendingMobileVpnTileAction']
   const createApp: typeof import('vue')['createApp']
+  const createMobileHealth: typeof import('./composables/mobile_health')['createMobileHealth']
   const createPinia: typeof import('pinia')['createPinia']
   const customRef: typeof import('vue')['customRef']
   const defineAsyncComponent: typeof import('vue')['defineAsyncComponent']
@@ -51,6 +52,7 @@ declare global {
   const listenGlobalEvents: typeof import('./composables/event')['listenGlobalEvents']
   const loadLastNetworkInstanceId: typeof import('./composables/config')['loadLastNetworkInstanceId']
   const loadMode: typeof import('./composables/mode')['loadMode']
+  const logMobileVpnDiagnostic: typeof import('./composables/backend')['logMobileVpnDiagnostic']
   const mapActions: typeof import('pinia')['mapActions']
   const mapGetters: typeof import('pinia')['mapGetters']
   const mapState: typeof import('pinia')['mapState']
@@ -93,6 +95,7 @@ declare global {
   const restartMobileNetwork: typeof import('./composables/backend')['restartMobileNetwork']
   const resumeMobileVpn: typeof import('./composables/mobile_vpn')['resumeMobileVpn']
   const runNetworkInstance: typeof import('./composables/backend')['runNetworkInstance']
+  const sampleMobileHealth: typeof import('./composables/mobile_health')['sampleMobileHealth']
   const saveLastNetworkInstanceId: typeof import('./composables/config')['saveLastNetworkInstanceId']
   const saveMode: typeof import('./composables/mode')['saveMode']
   const saveNetworkConfig: typeof import('./composables/backend')['saveNetworkConfig']
@@ -165,6 +168,7 @@ declare module 'vue' {
     readonly computed: UnwrapRef<typeof import('vue')['computed']>
     readonly consumePendingMobileVpnTileAction: UnwrapRef<typeof import('./composables/mobile_vpn')['consumePendingMobileVpnTileAction']>
     readonly createApp: UnwrapRef<typeof import('vue')['createApp']>
+    readonly createMobileHealth: UnwrapRef<typeof import('./composables/mobile_health')['createMobileHealth']>
     readonly createPinia: UnwrapRef<typeof import('pinia')['createPinia']>
     readonly customRef: UnwrapRef<typeof import('vue')['customRef']>
     readonly defineAsyncComponent: UnwrapRef<typeof import('vue')['defineAsyncComponent']>
@@ -199,6 +203,7 @@ declare module 'vue' {
     readonly listenGlobalEvents: UnwrapRef<typeof import('./composables/event')['listenGlobalEvents']>
     readonly loadLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['loadLastNetworkInstanceId']>
     readonly loadMode: UnwrapRef<typeof import('./composables/mode')['loadMode']>
+    readonly logMobileVpnDiagnostic: UnwrapRef<typeof import('./composables/backend')['logMobileVpnDiagnostic']>
     readonly mapActions: UnwrapRef<typeof import('pinia')['mapActions']>
     readonly mapGetters: UnwrapRef<typeof import('pinia')['mapGetters']>
     readonly mapState: UnwrapRef<typeof import('pinia')['mapState']>
@@ -241,6 +246,7 @@ declare module 'vue' {
     readonly restartMobileNetwork: UnwrapRef<typeof import('./composables/backend')['restartMobileNetwork']>
     readonly resumeMobileVpn: UnwrapRef<typeof import('./composables/mobile_vpn')['resumeMobileVpn']>
     readonly runNetworkInstance: UnwrapRef<typeof import('./composables/backend')['runNetworkInstance']>
+    readonly sampleMobileHealth: UnwrapRef<typeof import('./composables/mobile_health')['sampleMobileHealth']>
     readonly saveLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['saveLastNetworkInstanceId']>
     readonly saveMode: UnwrapRef<typeof import('./composables/mode')['saveMode']>
     readonly saveNetworkConfig: UnwrapRef<typeof import('./composables/backend')['saveNetworkConfig']>

@@ -108,6 +108,7 @@ macro_rules! get_client_manager {
 async fn set_mobile_connection_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     // Set intent before waiting: an in-flight start must observe a stop immediately.
     MOBILE_CONNECTION.set_enabled(enabled);
+    tracing::info!(target: "mobile_vpn", enabled, intent = MOBILE_CONNECTION.token(), pid = std::process::id(), "connection intent changed");
     let _control = MOBILE_CONTROL_LOCK.lock().await;
     if enabled {
         return Ok(());
@@ -310,6 +311,7 @@ async fn set_tun_fd(fd: i32, instance_id: Option<String>) -> Result<(), String> 
     if fd < 0 {
         return Err("Invalid TUN file descriptor".to_string());
     }
+    tracing::info!(target: "mobile_vpn", instance_id = %uuid, fd, "attaching Android TUN to core");
     #[cfg(target_os = "android")]
     let mut events = instance_manager
         .instance(uuid)
@@ -327,6 +329,7 @@ async fn set_tun_fd(fd: i32, instance_id: Option<String>) -> Result<(), String> 
             loop {
                 match events.recv().await.map_err(|e| e.to_string())? {
                     GlobalCtxEvent::TunDeviceReady(name) if name == format!("tunfd_{fd}") => {
+                        tracing::info!(target: "mobile_vpn", instance_id = %uuid, fd, "Android TUN ready in core");
                         return Ok::<(), String>(());
                     }
                     GlobalCtxEvent::TunDeviceError(error) => return Err(error),
@@ -750,6 +753,7 @@ async fn is_web_client_connected() -> Result<bool, String> {
 #[tauri::command]
 async fn restart_mobile_network(app: AppHandle) -> Result<(), String> {
     let token = MOBILE_CONNECTION.token();
+    tracing::info!(target: "mobile_vpn", intent = token, "recovery requested; waiting for control lock");
     let _control = MOBILE_CONTROL_LOCK.lock().await;
     if !MOBILE_CONNECTION.allows(token) {
         return Ok(());
@@ -758,20 +762,108 @@ async fn restart_mobile_network(app: AppHandle) -> Result<(), String> {
     let Some(id) = manager.get_enabled_instances_with_tun_ids().next() else {
         return Ok(());
     };
-    // Recreate sockets using the new physical network. Keep the saved configuration
-    // and its user/web ownership; this is recovery, not a new user start command.
-    manager
-        .handle_update_network_state(app.clone(), id, false)
+    let instances = INSTANCE_MANAGER
+        .read()
         .await
-        .map_err(|e| e.to_string())?;
+        .clone()
+        .ok_or("Local instance manager unavailable")?;
+    // Use the same mutation lock as management RPCs. In particular, a slow old
+    // overwrite must finish before recovery can take a fresh config snapshot.
+    let mutation_lock = instances.mutation_lock();
+    tracing::info!(target: "mobile_vpn", instance_id = %id, intent = token, "recovery: waiting for instance mutation lock");
+    let _mutation = mutation_lock.lock().await;
     if !MOBILE_CONNECTION.allows(token) {
-        manager
-            .handle_update_network_state(app.clone(), id, true)
-            .await
-            .map_err(|e| e.to_string())?;
         return Ok(());
     }
+    let config = instances
+        .config(id)
+        .ok_or("Recovery instance unavailable")?;
+    let control = instances
+        .config_control(id)
+        .ok_or("Recovery config control unavailable")?;
+    let started = std::time::Instant::now();
+    tracing::info!(target: "mobile_vpn", instance_id = %id, intent = token, "recovery: stopping old core instance");
+    // Do not use the short-lived local RPC request here. Its timeout can return
+    // while teardown is still running, allowing the UI to attach a TUN too early.
+    // Keep waiting (and holding the mutation lock) instead of cancelling cleanup.
+    let stop = instances.delete_network_instances([id]);
+    tokio::pin!(stop);
+    let mut progress = tokio::time::interval(std::time::Duration::from_secs(5));
+    progress.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut stop => { result.map_err(|e| e.to_string())?; break; }
+            _ = progress.tick() => {
+                tracing::warn!(target: "mobile_vpn", instance_id = %id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    cancelled = !MOBILE_CONNECTION.allows(token), "recovery: waiting for core cleanup");
+            }
+        }
+    }
+    tracing::info!(target: "mobile_vpn", instance_id = %id,
+        elapsed_ms = started.elapsed().as_millis() as u64, "recovery: old core cleanup completed");
+    if !MOBILE_CONNECTION.allows(token) {
+        tracing::info!(target: "mobile_vpn", instance_id = %id, "recovery cancelled by changed connection intent");
+        return Ok(());
+    }
+    // Preserve the actual running config, its source and file permissions;
+    // no-TUN instances and the management session are left intact.
+    instances
+        .run_network_instance(config, control)
+        .map_err(|e| e.to_string())?;
+    tracing::info!(target: "mobile_vpn", instance_id = %id, "recovery: replacement core started; awaiting TUN and health checks");
     manager.post_run_network_instance_hook(&app, &id).await
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileVpnDiagnostic {
+    session: String,
+    generation: u64,
+    instance_id: Option<String>,
+    phase: String,
+    reason: String,
+    peers: u32,
+    routes: u32,
+    recovery: u32,
+    network_id: Option<String>,
+    native_running: Option<bool>,
+    fd: Option<i32>,
+    peer_details: Option<Vec<MobilePeerDiagnostic>>,
+    route_details: Option<Vec<MobileRouteDiagnostic>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // Fields are consumed by the structured Debug log below.
+struct MobilePeerDiagnostic {
+    peer_id: u32,
+    conn_id: String,
+    latency_us: f64,
+    loss_rate: f64,
+    rx_packets: String,
+    tx_packets: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct MobileRouteDiagnostic {
+    peer_id: u32,
+    next_hop: u32,
+    cost: i32,
+    version: String,
+}
+
+#[tauri::command]
+fn log_mobile_vpn_diagnostic(snapshot: MobileVpnDiagnostic) {
+    tracing::info!(target: "mobile_vpn", pid = std::process::id(),
+        session = %snapshot.session, generation = snapshot.generation,
+        instance_id = ?snapshot.instance_id, phase = %snapshot.phase, reason = %snapshot.reason,
+        peers = snapshot.peers, routes = snapshot.routes, recovery = snapshot.recovery,
+        network_id = ?snapshot.network_id, native_running = ?snapshot.native_running,
+        fd = ?snapshot.fd, peer_details = ?snapshot.peer_details,
+        route_details = ?snapshot.route_details, "VPN diagnostic");
 }
 
 // 获取日志目录的辅助函数
@@ -1656,15 +1748,17 @@ pub fn run_gui() -> std::process::ExitCode {
             let config = LoggingConfig::builder()
                 .file_logger(FileLoggerConfig {
                     dir: Some(log_dir.to_string_lossy().to_string()),
-                    level: None,
+                    level: cfg!(target_os = "android").then(|| "info".to_string()),
                     file: None,
-                    size_mb: None,
-                    count: None,
+                    size_mb: cfg!(target_os = "android").then_some(5),
+                    count: cfg!(target_os = "android").then_some(3),
                 })
                 .build();
             let Ok(_) = log::init(&config, true) else {
                 return Ok(());
             };
+            tracing::info!(target: "mobile_vpn", pid = std::process::id(),
+                version = easytier::VERSION, "application logging initialized");
 
             // for tray icon, menu need to be built in js
             #[cfg(not(target_os = "android"))]
@@ -1717,6 +1811,7 @@ pub fn run_gui() -> std::process::ExitCode {
             mobile_connection_enabled,
             set_mobile_connection_enabled,
             restart_mobile_network,
+            log_mobile_vpn_diagnostic,
             is_web_client_connected,
             get_log_dir_path,
         ])

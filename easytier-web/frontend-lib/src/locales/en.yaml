@@ -94,7 +94,16 @@ mobile-vpn:
   address: Waiting for virtual IP
   starting: Establishing system VPN
   connecting: VPN established, waiting for peers
-  connected: VPN established, peers connected
+  connected: VPN established, heartbeats and routes available
+  checking: VPN established, checking connectivity
+  recovering: Cleaning up the old connection and rebuilding VPN
+  waiting_heartbeat: No working heartbeat yet, or packets are being lost. Persistent failure will trigger recovery.
+  waiting_routes: Heartbeats work, but no reachable peer route is available yet. Persistent failure will trigger recovery.
+  recovery_exhausted: Connectivity is still unconfirmed after 3 recovery attempts. Export logs or retry manually.
+  recovery_failed: Rebuilding the connection failed. Export logs or retry manually.
+  recovery_slow: Waiting for the old connection to exit. Stop cancels the subsequent restart.
+  health_progress: 'Reachable routes: {routes} · Recovery: {count} / 3'
+  http_unverified: Tunnel heartbeats and routes are available; the target HTTP service has not been tested.
   waiting_network: Waiting for phone network
   reconnecting: Network changed, reconnecting
   error: Connection problem

@@ -2729,6 +2729,7 @@ dependencies = [
  "tauri-plugin-vpnservice",
  "thunk-rs",
  "tokio",
+ "tracing",
  "url",
  "uuid",
  "winapi",

@@ -10,7 +10,8 @@ import {
   stop_vpn,
   type VpnTileAction,
 } from 'tauri-plugin-vpnservice-api'
-import { collectNetworkInfo, getConfig, listNetworkInstanceIds, restartMobileNetwork, setTunFd } from './backend'
+import { collectNetworkInfo, getConfig, listNetworkInstanceIds, logMobileVpnDiagnostic, restartMobileNetwork, setTunFd } from './backend'
+import { createMobileHealth, sampleMobileHealth } from './mobile_health'
 
 type Route = NetworkTypes.Route
 
@@ -39,6 +40,11 @@ let permissionDenied = false
 let networkId: string | null | undefined
 let networkAvailable = true
 let networkChangeTimer: ReturnType<typeof setTimeout> | undefined
+let health = createMobileHealth()
+let recovering = false
+let recoveryBlocked = false
+const diagnosticSession = crypto.randomUUID()
+let lastDiagnosticAt = 0
 
 export const mobileVpnState = reactive({
   enabled: false,
@@ -47,16 +53,43 @@ export const mobileVpnState = reactive({
   attempt: 0,
   ipv4: '',
   peers: 0,
+  routes: 0,
+  recovery: 0,
   changedAt: Date.now(),
 })
 
 export function setMobileVpnPhase(phase: string, error = '') {
+  const changed = phase !== mobileVpnState.phase || error !== mobileVpnState.error
   if (phase !== mobileVpnState.phase) mobileVpnState.changedAt = Date.now()
   mobileVpnState.phase = phase
   mobileVpnState.error = error
+  if (changed) diagnostic('phase_changed')
+}
+
+function diagnostic(reason: string, native?: { running?: boolean, fd?: number }, info?: NetworkTypes.NetworkInstanceRunningInfo) {
+  lastDiagnosticAt = Date.now()
+  // Only allowlisted metadata crosses the bridge: no config URLs, keys or packets.
+  void logMobileVpnDiagnostic({
+    session: diagnosticSession, generation: vpnReconcileGeneration,
+    instanceId: desiredVpnInstanceId, phase: mobileVpnState.phase, reason,
+    peers: mobileVpnState.peers, routes: mobileVpnState.routes,
+    recovery: mobileVpnState.recovery, networkId,
+    nativeRunning: native?.running, fd: native?.fd,
+    peerDetails: info?.peers?.slice(0, 8).flatMap(peer => (peer.conns ?? []).slice(0, 2).map(conn => ({
+      peerId: peer.peer_id, connId: conn.conn_id, latencyUs: Number(conn.stats?.latency_us ?? 0),
+      lossRate: Number(conn.loss_rate ?? 0), rxPackets: String(conn.stats?.rx_packets ?? 0),
+      txPackets: String(conn.stats?.tx_packets ?? 0),
+    }))),
+    routeDetails: info?.routes?.slice(0, 8).map(route => ({
+      peerId: route.peer_id, nextHop: route.next_hop_peer_id, cost: route.cost, version: route.version,
+    })),
+  }).catch(() => { /* Diagnostics must never interrupt VPN operation. */ })
 }
 
 export function resumeMobileVpn() {
+  health = createMobileHealth()
+  recoveryBlocked = false
+  mobileVpnState.recovery = 0
   permissionDenied = false
   suspended = false
   mobileVpnState.enabled = true
@@ -71,6 +104,7 @@ export async function suspendMobileVpn() {
   clearTimeout(networkChangeTimer)
   mobileVpnState.ipv4 = ''
   mobileVpnState.peers = 0
+  mobileVpnState.routes = 0
   mobileVpnState.attempt = 0
   setMobileVpnPhase('stopped')
   // Stop immediately even while an old start is waiting for an authorization
@@ -122,6 +156,7 @@ async function requestVpnPermissionOnce() {
   }
 
   const granted = prepare_ret?.granted === true
+  diagnostic(granted ? 'vpn_permission_granted' : 'vpn_permission_denied')
   if (!granted && !suspended) {
     permissionDenied = true
     setMobileVpnPhase('error', 'vpn_permission_denied')
@@ -261,6 +296,7 @@ async function doStopVpn(force = false) {
   const stop_ret = await stop_vpn()
   console.log('stop vpn', JSON.stringify((stop_ret)))
   await waitVpnStatus(false, 3)
+  diagnostic('native_vpn_stopped')
 
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
@@ -318,6 +354,7 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
       if (typeof native.fd !== 'number' || native.fd < 0) throw new Error('vpn_fd_unavailable')
       // Do not publish success until the matching instance accepted this TUN.
       await setTunFd(native.fd, instanceId)
+      diagnostic('tun_attached', native)
       if (!isCurrentVpnReconcile(instanceId, generation)) {
         await doStopVpn(true)
         return
@@ -420,10 +457,12 @@ async function stopVpnOwnedByOtherInstance(instanceId: string, generation: numbe
 async function reconcileNetworkInstance(instanceId: string, generation: number) {
   if (!isCurrentVpnReconcile(instanceId, generation))
     return
-  if (permissionDenied) return
+  if (permissionDenied || recoveryBlocked) return
 
   clearVpnReconcileTimer()
   if (!networkAvailable) {
+    health.unhealthySince = undefined
+    health.healthySince = undefined
     setMobileVpnPhase('waiting_network')
     return
   }
@@ -665,8 +704,14 @@ export async function onPhysicalNetworkChange(payload: unknown) {
   const changed = networkId !== undefined && (nextId !== networkId || networkAvailable !== payload.available)
   networkId = nextId
   networkAvailable = payload.available
+  if (changed) {
+    health.unhealthySince = undefined
+    health.healthySince = undefined
+    health.samples.clear()
+    diagnostic(networkAvailable ? 'physical_network_changed' : 'physical_network_lost')
+  }
   if (changed || !networkAvailable) clearTimeout(networkChangeTimer)
-  if (suspended) return
+  if (suspended || recoveryBlocked) return
   if (!networkAvailable) {
     clearVpnReconcileTimer()
     setMobileVpnPhase('waiting_network')
@@ -693,7 +738,7 @@ export async function onPhysicalNetworkChange(payload: unknown) {
 export async function refreshMobileVpnStatus() {
   const native = await get_vpn_status()
   await onPhysicalNetworkChange({ available: native?.networkAvailable ?? true, networkId: native?.networkId })
-  if (suspended || !networkAvailable || networkChangeTimer) return
+  if (suspended || !networkAvailable || networkChangeTimer || recovering || recoveryBlocked) return
   if (!desiredVpnInstanceId) {
     await syncMobileVpnService()
     if (!desiredVpnInstanceId && mobileVpnState.phase === 'config'
@@ -709,12 +754,55 @@ export async function refreshMobileVpnStatus() {
     await enqueueVpnReconcile(desiredVpnInstanceId, vpnReconcileGeneration)
     return
   }
-  const info = (await collectNetworkInfo(desiredVpnInstanceId))?.info?.map?.[desiredVpnInstanceId]
-  if (suspended) return
-  if (info?.error_msg) {
-    setMobileVpnPhase('error', info.error_msg)
-    return
+  const instanceId = desiredVpnInstanceId
+  const generation = vpnReconcileGeneration
+  let info: NetworkTypes.NetworkInstanceRunningInfo | undefined
+  try {
+    info = (await collectNetworkInfo(instanceId))?.info?.map?.[instanceId]
   }
-  mobileVpnState.peers = info?.peers?.length ?? 0
-  setMobileVpnPhase(mobileVpnState.peers ? 'connected' : 'connecting')
+  catch {
+    // Failed local RPC polls count as unhealthy too; do not silently retry forever.
+    diagnostic('network_info_failed', native)
+  }
+  if (!isCurrentVpnReconcile(instanceId, generation)) return
+  const status = sampleMobileHealth(health, info, Date.now())
+  mobileVpnState.peers = status.peers
+  mobileVpnState.routes = status.routes
+  mobileVpnState.recovery = health.recoveries
+  setMobileVpnPhase(status.healthy ? 'connected' : status.exhausted ? 'error' : 'checking',
+    status.healthy ? '' : status.exhausted ? 'recovery_exhausted' : status.reason)
+  if (Date.now() - lastDiagnosticAt >= 15000) diagnostic(status.reason, native, info)
+  if (!status.recover) return
+
+  recovering = true
+  health.recoveries++
+  mobileVpnState.recovery = health.recoveries
+  health.nextRecoveryAt = Date.now() + 45000 * 2 ** (health.recoveries - 1)
+  health.unhealthySince = undefined
+  health.samples.clear()
+  setMobileVpnPhase('recovering')
+  diagnostic(`recover_${status.reason}`, native, info)
+  const slow = setTimeout(() => {
+    if (isCurrentVpnReconcile(instanceId, generation)) setMobileVpnPhase('recovering', 'recovery_slow')
+  }, 10000)
+  try {
+    await enqueueVpnTask(async () => {
+      if (!isCurrentVpnReconcile(instanceId, generation)) return
+      await doStopVpn(true)
+      if (!isCurrentVpnReconcile(instanceId, generation)) return
+      await restartMobileNetwork()
+    })
+    if (isCurrentVpnReconcile(instanceId, generation)) await syncMobileVpnService()
+  }
+  catch {
+    if (isCurrentVpnReconcile(instanceId, generation)) {
+      recoveryBlocked = true
+      setMobileVpnPhase('error', 'recovery_failed')
+      diagnostic('recovery_failed')
+    }
+  }
+  finally {
+    clearTimeout(slow)
+    recovering = false
+  }
 }
