@@ -85,6 +85,31 @@ logging_level_trace: Trace
 logging_level_off: Off
 logging_open_dir: Open Log Directory
 logging_copy_dir: Copy Log Path
+mobile-vpn:
+  stopped: Stopped
+  stopped_hint: Automatic retries are paused. Connect manually or open the app from the launcher again.
+  permission: Waiting for VPN permission
+  config: Connecting to configuration server or loading network
+  config_wait_timeout: No runnable configuration received after 15 seconds. Check the phone network, server address, and assigned configuration.
+  address: Waiting for virtual IP
+  starting: Establishing system VPN
+  connecting: VPN established, waiting for peers
+  connected: VPN established, peers connected
+  waiting_network: Waiting for phone network
+  reconnecting: Network changed, reconnecting
+  error: Connection problem
+  connect: Connect / retry
+  stop: Stop
+  peers: 'Connected peers: {count}'
+  retry_progress: 'Retry: {count} / {max}'
+  vpn_permission_denied: VPN permission was denied or dismissed. Connect again to authorize it.
+  vpn_start_timeout: System VPN startup timed out. Trying to recover.
+  vpn_fd_unavailable: System VPN did not provide a valid tunnel interface.
+  vpn_no_network: Add a configuration URL or create a local network first.
+  network_info_unavailable: Network instance is not ready. Check the configuration server and peer connections.
+  dhcp_ipv4_unavailable: No virtual IP yet. Check peer connectivity and address configuration.
+  static_ipv4_unavailable: No static virtual IP. Check network configuration.
+
 vpn_tile_no_network: No configured network
 vpn_tile_no_network_description: Configure a network in EasyTier before using the VPN tile.
 vpn_tile_started: VPN network started
@@ -469,6 +494,16 @@ mode:
   autostart_hint: Auto-start on boot is provided by service mode. After switching to Service mode and saving, EasyTier will be registered as a system service that starts automatically at boot and keeps running in the background.
 
 config-server:
+  active_profile: Selected configuration
+  profile_name: Configuration name (optional)
+  unnamed: Unnamed configuration
+  no_profile: No configuration server
+  no_profiles: No saved configurations. Add an address to get started.
+  add_profile: Add configuration
+  remove_profile: Delete configuration
+  invalid_address: An address is required and cannot contain whitespace.
+  duplicate_address: Configuration addresses must be unique.
+  missing_selection: The selected configuration no longer exists. Select another one.
   title: Config Server
   address: Config Server Address
   address_placeholder: "e.g.: udp://127.0.0.1:22020/admin or admin"

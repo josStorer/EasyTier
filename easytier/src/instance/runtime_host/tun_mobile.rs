@@ -53,7 +53,7 @@ impl NativeTunRuntime {
         fd: i32,
     ) -> anyhow::Result<()> {
         nic_state.drain().await;
-        if fd <= 0 {
+        if fd < 0 {
             return Ok(());
         }
         let closed = Arc::new(Notify::new());

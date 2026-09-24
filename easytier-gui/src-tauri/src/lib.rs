@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod connection_intent;
 mod elevate;
 
 use anyhow::Context;
@@ -78,6 +79,21 @@ static RPC_SERVER: once_cell::sync::Lazy<Mutex<Option<RpcServer>>> =
 static WEB_CLIENT: once_cell::sync::Lazy<RwLock<Option<WebClient>>> =
     once_cell::sync::Lazy::new(|| RwLock::new(None));
 
+static MOBILE_CONNECTION: once_cell::sync::Lazy<connection_intent::ConnectionIntent> =
+    once_cell::sync::Lazy::new(connection_intent::ConnectionIntent::default);
+static MOBILE_CONTROL_LOCK: Mutex<()> = Mutex::const_new(());
+static WEB_CLIENT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tauri::command]
+fn mobile_connection_enabled() -> bool {
+    MOBILE_CONNECTION.enabled()
+}
+
+async fn disconnect_config_server() {
+    WEB_CLIENT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *WEB_CLIENT.write().await = None;
+}
+
 macro_rules! get_client_manager {
     () => {{
         let guard = CLIENT_MANAGER
@@ -86,6 +102,28 @@ macro_rules! get_client_manager {
         RwLockReadGuard::try_map(guard, |cm| cm.as_ref())
             .map_err(|_| "RPC connection not initialized".to_string())
     }};
+}
+
+#[tauri::command]
+async fn set_mobile_connection_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    // Set intent before waiting: an in-flight start must observe a stop immediately.
+    MOBILE_CONNECTION.set_enabled(enabled);
+    let _control = MOBILE_CONTROL_LOCK.lock().await;
+    if enabled {
+        return Ok(());
+    }
+    disconnect_config_server().await;
+    #[cfg(target_os = "android")]
+    {
+        let manager = get_client_manager!()?;
+        manager
+            .disable_instances_with_tun(&app, false)
+            .await
+            .map_err(|e| e.to_string())?;
+        manager.notify_vpn_stop_if_no_tun(&app)?;
+    }
+    let _ = app;
+    Ok(())
 }
 
 #[tauri::command]
@@ -129,6 +167,11 @@ async fn run_network_instance(
     cfg: NetworkConfig,
     save: bool,
 ) -> Result<(), String> {
+    let _control = MOBILE_CONTROL_LOCK.lock().await;
+    #[cfg(target_os = "android")]
+    if !cfg.no_tun() && !MOBILE_CONNECTION.enabled() {
+        return Err("mobile_connection_stopped".to_string());
+    }
     let client_manager = get_client_manager!()?;
     let toml_config = cfg.gen_config().map_err(|e| e.to_string())?;
     client_manager
@@ -244,17 +287,55 @@ async fn set_logging_level(level: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tun_fd(fd: i32) -> Result<(), String> {
+async fn set_tun_fd(fd: i32, instance_id: Option<String>) -> Result<(), String> {
     let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
         return Err("set_tun_fd is not supported in remote mode".to_string());
     };
-    if let Some(uuid) = get_client_manager!()?
-        .get_enabled_instances_with_tun_ids()
-        .next()
+    let manager = get_client_manager!()?;
+    let uuid = if let Some(id) = instance_id {
+        let id = id.parse::<uuid::Uuid>().map_err(|e| e.to_string())?;
+        if !manager
+            .get_enabled_instances_with_tun_ids()
+            .any(|enabled| enabled == id)
+        {
+            return Err("VPN instance is no longer enabled".to_string());
+        }
+        id
+    } else {
+        manager
+            .get_enabled_instances_with_tun_ids()
+            .next()
+            .ok_or_else(|| "No enabled VPN instance".to_string())?
+    };
+    if fd < 0 {
+        return Err("Invalid TUN file descriptor".to_string());
+    }
+    #[cfg(target_os = "android")]
+    let mut events = instance_manager
+        .instance(uuid)
+        .and_then(|instance| subscribe_native_instance_event(&instance))
+        .ok_or_else(|| "VPN instance event stream is unavailable".to_string())?;
+    instance_manager
+        .attach_tun_fd(uuid, fd)
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
     {
-        instance_manager
-            .attach_tun_fd(uuid, fd)
-            .map_err(|e| e.to_string())?;
+        use easytier::common::global_ctx::GlobalCtxEvent;
+        // attach_tun_fd only queues work. Wait for the runtime to actually open
+        // the device so a failed async attachment cannot appear as success.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.map_err(|e| e.to_string())? {
+                    GlobalCtxEvent::TunDeviceReady(name) if name == format!("tunfd_{fd}") => {
+                        return Ok::<(), String>(());
+                    }
+                    GlobalCtxEvent::TunDeviceError(error) => return Err(error),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Timed out attaching the VPN interface to the core".to_string())??;
     }
     Ok(())
 }
@@ -292,6 +373,27 @@ async fn update_network_config_state(
     instance_id: String,
     disabled: bool,
 ) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let config = get_client_manager!()?
+            .handle_get_network_config(
+                app.clone(),
+                instance_id
+                    .parse()
+                    .map_err(|e: uuid::Error| e.to_string())?,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if !config.no_tun() {
+            if disabled {
+                MOBILE_CONNECTION.set_enabled(false);
+                disconnect_config_server().await;
+            } else if !MOBILE_CONNECTION.enabled() {
+                return Err("mobile_connection_stopped".to_string());
+            }
+        }
+    }
+    let _control = MOBILE_CONTROL_LOCK.lock().await;
     let instance_id = instance_id
         .parse()
         .map_err(|e: uuid::Error| e.to_string())?;
@@ -586,18 +688,27 @@ async fn is_client_running() -> Result<bool, String> {
 
 #[tauri::command]
 async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), String> {
+    let epoch = WEB_CLIENT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let mut web_client_guard = WEB_CLIENT.write().await;
+    // Drop the old management session before constructing the replacement.
+    *web_client_guard = None;
     let Some(url) = url else {
-        *web_client_guard = None;
         return Ok(());
     };
+    if cfg!(target_os = "android") && !MOBILE_CONNECTION.enabled() {
+        return Ok(());
+    }
     let instance_manager = INSTANCE_MANAGER
         .try_read()
         .map_err(|_| "Failed to acquire read lock for instance manager")?
         .clone()
         .ok_or_else(|| "Instance manager is not available".to_string())?;
 
-    let hooks = Arc::new(manager::GuiHooks { app: app.clone() });
+    let hooks = Arc::new(manager::GuiHooks {
+        app: app.clone(),
+        epoch,
+        intent: MOBILE_CONNECTION.token(),
+    });
     let machine_id_state_dir = app
         .path()
         .app_data_dir()
@@ -618,7 +729,11 @@ async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), Stri
     .await
     .with_context(|| "Failed to initialize web client")
     .map_err(|e| format!("{:#}", e))?;
-    *web_client_guard = Some(web_client);
+    if epoch == WEB_CLIENT_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+        && (!cfg!(target_os = "android") || MOBILE_CONNECTION.enabled())
+    {
+        *web_client_guard = Some(web_client);
+    }
     Ok(())
 }
 
@@ -630,6 +745,33 @@ async fn is_web_client_connected() -> Result<bool, String> {
     } else {
         Ok(false)
     }
+}
+
+#[tauri::command]
+async fn restart_mobile_network(app: AppHandle) -> Result<(), String> {
+    let token = MOBILE_CONNECTION.token();
+    let _control = MOBILE_CONTROL_LOCK.lock().await;
+    if !MOBILE_CONNECTION.allows(token) {
+        return Ok(());
+    }
+    let manager = get_client_manager!()?;
+    let Some(id) = manager.get_enabled_instances_with_tun_ids().next() else {
+        return Ok(());
+    };
+    // Recreate sockets using the new physical network. Keep the saved configuration
+    // and its user/web ownership; this is recovery, not a new user start command.
+    manager
+        .handle_update_network_state(app.clone(), id, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !MOBILE_CONNECTION.allows(token) {
+        manager
+            .handle_update_network_state(app.clone(), id, true)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    manager.post_run_network_instance_hook(&app, &id).await
 }
 
 // 获取日志目录的辅助函数
@@ -718,6 +860,15 @@ mod manager {
 
     pub(super) struct GuiHooks {
         pub(super) app: AppHandle,
+        pub(super) epoch: u64,
+        pub(super) intent: u64,
+    }
+
+    impl GuiHooks {
+        fn is_current(&self) -> bool {
+            self.epoch == super::WEB_CLIENT_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+                && (!cfg!(target_os = "android") || super::MOBILE_CONNECTION.allows(self.intent))
+        }
     }
 
     #[async_trait]
@@ -726,6 +877,9 @@ mod manager {
             &self,
             cfg: &easytier::common::config::TomlConfigLoader,
         ) -> Result<(), String> {
+            if !self.is_current() {
+                return Err("Configuration connection was stopped or replaced".to_string());
+            }
             let client_manager = get_client_manager!()?;
             client_manager
                 .pre_run_network_instance_hook(
@@ -733,10 +887,23 @@ mod manager {
                     cfg,
                     PersistedConfigSource::from_runtime_source(cfg.get_network_config_source()),
                 )
-                .await
+                .await?;
+            if !self.is_current() {
+                return Err("Configuration connection was stopped or replaced".to_string());
+            }
+            Ok(())
         }
 
         async fn post_run_network_instance(&self, instance_id: &uuid::Uuid) -> Result<(), String> {
+            if !self.is_current() {
+                if let Some(manager) = super::INSTANCE_MANAGER.read().await.as_ref() {
+                    manager
+                        .delete_network_instances([*instance_id])
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                return Err("Configuration connection was stopped or replaced".to_string());
+            }
             let client_manager = get_client_manager!()?;
             client_manager
                 .post_run_network_instance_hook(&self.app, instance_id)
@@ -744,6 +911,9 @@ mod manager {
         }
 
         async fn post_remove_network_instances(&self, ids: &[uuid::Uuid]) -> Result<(), String> {
+            if !self.is_current() {
+                return Ok(());
+            }
             let client_manager = get_client_manager!()?;
             client_manager
                 .post_remote_remove_network_instances_hook(&self.app, ids)
@@ -1056,6 +1226,12 @@ mod manager {
             cfg: &easytier::common::config::TomlConfigLoader,
             source: PersistedConfigSource,
         ) -> Result<(), String> {
+            if cfg!(target_os = "android")
+                && !cfg.get_flags().no_tun
+                && !super::MOBILE_CONNECTION.enabled()
+            {
+                return Err("mobile_connection_stopped".to_string());
+            }
             let instance_id = cfg.get_id();
             app.emit("pre_run_network_instance", instance_id.to_string())
                 .map_err(|e| e.to_string())?;
@@ -1099,6 +1275,22 @@ mod manager {
             app: &AppHandle,
             instance_id: &uuid::Uuid,
         ) -> Result<(), String> {
+            #[cfg(target_os = "android")]
+            if !super::MOBILE_CONNECTION.enabled()
+                && self
+                    .storage
+                    .network_configs
+                    .get(instance_id)
+                    .is_some_and(|config| !config.config.no_tun())
+            {
+                if let Some(manager) = super::INSTANCE_MANAGER.read().await.as_ref() {
+                    manager
+                        .delete_network_instances([*instance_id])
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                return Err("mobile_connection_stopped".to_string());
+            }
             #[cfg(target_os = "android")]
             if let Some(instance_manager) = super::INSTANCE_MANAGER.read().await.as_ref() {
                 let instance_uuid = *instance_id;
@@ -1522,6 +1714,9 @@ pub fn run_gui() -> std::process::ExitCode {
             init_rpc_connection,
             is_client_running,
             init_web_client,
+            mobile_connection_enabled,
+            set_mobile_connection_enabled,
+            restart_mobile_network,
             is_web_client_connected,
             get_log_dir_path,
         ])

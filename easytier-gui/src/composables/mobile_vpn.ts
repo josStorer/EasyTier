@@ -1,6 +1,7 @@
 import type { NetworkTypes } from 'easytier-frontend-lib'
 import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
+import { reactive } from 'vue'
 import {
   consume_vpn_tile_action,
   get_vpn_status,
@@ -9,7 +10,7 @@ import {
   stop_vpn,
   type VpnTileAction,
 } from 'tauri-plugin-vpnservice-api'
-import { collectNetworkInfo, getConfig, listNetworkInstanceIds, setTunFd } from './backend'
+import { collectNetworkInfo, getConfig, listNetworkInstanceIds, restartMobileNetwork, setTunFd } from './backend'
 
 type Route = NetworkTypes.Route
 
@@ -33,6 +34,49 @@ let vpnReconcileQueue: Promise<void> = Promise.resolve()
 let vpnPermissionRequest: Promise<boolean> | null = null
 let vpnTileActionHandler: ((action: VpnTileAction) => Promise<void>) | undefined
 let vpnTileActionQueue: Promise<void> = Promise.resolve()
+let suspended = true
+let permissionDenied = false
+let networkId: string | null | undefined
+let networkAvailable = true
+let networkChangeTimer: ReturnType<typeof setTimeout> | undefined
+
+export const mobileVpnState = reactive({
+  enabled: false,
+  phase: 'stopped',
+  error: '',
+  attempt: 0,
+  ipv4: '',
+  peers: 0,
+  changedAt: Date.now(),
+})
+
+export function setMobileVpnPhase(phase: string, error = '') {
+  if (phase !== mobileVpnState.phase) mobileVpnState.changedAt = Date.now()
+  mobileVpnState.phase = phase
+  mobileVpnState.error = error
+}
+
+export function resumeMobileVpn() {
+  permissionDenied = false
+  suspended = false
+  mobileVpnState.enabled = true
+  vpnReconcileAttempts = 0
+  setMobileVpnPhase('config')
+}
+
+export async function suspendMobileVpn() {
+  suspended = true
+  mobileVpnState.enabled = false
+  beginVpnReconcile()
+  clearTimeout(networkChangeTimer)
+  mobileVpnState.ipv4 = ''
+  mobileVpnState.peers = 0
+  mobileVpnState.attempt = 0
+  setMobileVpnPhase('stopped')
+  // Stop immediately even while an old start is waiting for an authorization
+  // dialog. Its generation check prevents it from starting after the answer.
+  await doStopVpn(true)
+}
 
 const curVpnStatus: vpnStatus = {
   running: false,
@@ -54,7 +98,8 @@ export async function consumePendingMobileVpnTileAction() {
     return false
   }
 
-  const action = (await consume_vpn_tile_action())?.action
+  const pending = await consume_vpn_tile_action()
+  const action = pending?.action ?? (pending?.launchRequested ? 'start' : undefined)
   if (action !== 'start' && action !== 'stop') {
     return false
   }
@@ -68,6 +113,7 @@ export async function consumePendingMobileVpnTileAction() {
 }
 
 async function requestVpnPermissionOnce() {
+  setMobileVpnPhase('permission')
   console.log('prepare vpn')
   const prepare_ret = await prepare_vpn()
   console.log('prepare vpn', JSON.stringify((prepare_ret)))
@@ -75,8 +121,10 @@ async function requestVpnPermissionOnce() {
     throw new Error(prepare_ret.errorMsg)
   }
 
-  const granted = prepare_ret?.granted ?? true
-  if (!granted) {
+  const granted = prepare_ret?.granted === true
+  if (!granted && !suspended) {
+    permissionDenied = true
+    setMobileVpnPhase('error', 'vpn_permission_denied')
     console.info('vpn permission request was denied or dismissed')
   }
 
@@ -117,7 +165,7 @@ function beginVpnReconcile(instanceId?: string) {
 }
 
 function isCurrentVpnReconcile(instanceId: string, generation: number) {
-  return desiredVpnInstanceId === (instanceId || undefined) && vpnReconcileGeneration === generation
+  return !suspended && desiredVpnInstanceId === (instanceId || undefined) && vpnReconcileGeneration === generation
 }
 
 function scheduleVpnReconcile(instanceId: string, generation: number, reason: string) {
@@ -125,6 +173,7 @@ function scheduleVpnReconcile(instanceId: string, generation: number, reason: st
     return
 
   if (vpnReconcileAttempts >= VPN_RECONCILE_MAX_ATTEMPTS) {
+    setMobileVpnPhase('error', reason)
     console.error(
       'vpn service reconcile stopped after maximum attempts',
       instanceId,
@@ -136,6 +185,7 @@ function scheduleVpnReconcile(instanceId: string, generation: number, reason: st
 
   clearVpnReconcileTimer()
   vpnReconcileAttempts += 1
+  mobileVpnState.attempt = vpnReconcileAttempts
   console.log(
     'vpn service is not ready, retrying',
     JSON.stringify({
@@ -148,7 +198,9 @@ function scheduleVpnReconcile(instanceId: string, generation: number, reason: st
   )
   vpnReconcileTimer = setTimeout(() => {
     vpnReconcileTimer = null
-    void enqueueVpnReconcile(instanceId, generation)
+    void enqueueVpnReconcile(instanceId, generation).catch(error => {
+      if (isCurrentVpnReconcile(instanceId, generation)) setMobileVpnPhase('error', String(error))
+    })
   }, VPN_RECONCILE_INTERVAL_MS)
 }
 
@@ -186,7 +238,12 @@ function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_statu
 
 async function waitVpnStatus(target_status: boolean, timeout_sec: number) {
   const start_time = Date.now()
-  while (curVpnStatus.running !== target_status) {
+  while (true) {
+    const native = await get_vpn_status()
+    if ((native?.running ?? false) === target_status) {
+      curVpnStatus.running = target_status
+      return
+    }
     if (Date.now() - start_time > timeout_sec * 1000) {
       throw new Error('wait vpn status timeout')
     }
@@ -203,21 +260,20 @@ async function doStopVpn(force = false) {
   console.log('stop vpn')
   const stop_ret = await stop_vpn()
   console.log('stop vpn', JSON.stringify((stop_ret)))
-  if (wasRunning) {
-    await waitVpnStatus(false, 3)
-  }
+  await waitVpnStatus(false, 3)
 
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
 }
 
-async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+async function doStartVpn(instanceId: string, generation: number, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
   if (curVpnStatus.running) {
     return
   }
 
   console.log('start vpn service', ipv4Addr, cidr, routes, dns)
   const request = {
+    requestId: crypto.randomUUID(),
     ipv4Addr: `${ipv4Addr}/${cidr}`,
     routes,
     dns,
@@ -227,38 +283,68 @@ async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, ro
 
   let start_ret = await start_vpn(request)
   console.log('start vpn response', JSON.stringify(start_ret))
+  if (!isCurrentVpnReconcile(instanceId, generation)) {
+    await doStopVpn(true)
+    return
+  }
   if (start_ret?.errorMsg === 'need_prepare') {
     const granted = await requestVpnPermission()
     if (!granted) {
       throw new Error('vpn_permission_denied')
     }
+    if (!isCurrentVpnReconcile(instanceId, generation)) return
     start_ret = await start_vpn(request)
     console.log('start vpn retry response', JSON.stringify(start_ret))
+  }
+
+  if (!isCurrentVpnReconcile(instanceId, generation)) {
+    await doStopVpn(true)
+    return
   }
 
   if (start_ret?.errorMsg?.length) {
     throw new Error(start_ret.errorMsg)
   }
-  await waitVpnStatus(true, 3)
+  setMobileVpnPhase('starting')
+  const deadline = Date.now() + 10000
+  while (true) {
+    if (!isCurrentVpnReconcile(instanceId, generation)) {
+      await doStopVpn(true)
+      return
+    }
+    const native = await get_vpn_status()
+    if (native?.errorMsg) throw new Error(native.errorMsg)
+    if (native?.running && native.requestId === request.requestId) {
+      if (typeof native.fd !== 'number' || native.fd < 0) throw new Error('vpn_fd_unavailable')
+      // Do not publish success until the matching instance accepted this TUN.
+      await setTunFd(native.fd, instanceId)
+      if (!isCurrentVpnReconcile(instanceId, generation)) {
+        await doStopVpn(true)
+        return
+      }
+      curVpnStatus.running = true
+      break
+    }
+    if (Date.now() >= deadline) throw new Error('vpn_start_timeout')
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
 
   curVpnStatus.ipv4Addr = ipv4Addr
   curVpnStatus.ipv4Cidr = cidr
   curVpnStatus.routes = routes
   curVpnStatus.dns = dns
   activeVpnInstanceId = instanceId
+  mobileVpnState.ipv4 = ipv4Addr
+  mobileVpnState.attempt = 0
+  vpnReconcileAttempts = 0
+  setMobileVpnPhase('connecting')
 }
 
-async function onVpnServiceStart(payload: any) {
+async function onVpnServiceStart(payload: unknown) {
   console.log('vpn service start', JSON.stringify(payload))
-  curVpnStatus.running = true
-  if (payload.fd) {
-    await setTunFd(payload.fd).catch((e) => {
-      console.error('set tun fd failed', e)
-    })
-  }
 }
 
-async function onVpnServiceStop(payload: any) {
+async function onVpnServiceStop(payload: unknown) {
   console.log('vpn service stop', JSON.stringify(payload))
   curVpnStatus.running = false
   activeVpnInstanceId = undefined
@@ -267,6 +353,12 @@ async function onVpnServiceStop(payload: any) {
 
 async function registerVpnServiceListener() {
   console.log('register vpn service listener')
+  await addPluginListener(
+    'vpnservice',
+    'physical_network_changed',
+    onPhysicalNetworkChange,
+  )
+
   await addPluginListener(
     'vpnservice',
     'vpn_service_start',
@@ -328,8 +420,13 @@ async function stopVpnOwnedByOtherInstance(instanceId: string, generation: numbe
 async function reconcileNetworkInstance(instanceId: string, generation: number) {
   if (!isCurrentVpnReconcile(instanceId, generation))
     return
+  if (permissionDenied) return
 
   clearVpnReconcileTimer()
+  if (!networkAvailable) {
+    setMobileVpnPhase('waiting_network')
+    return
+  }
 
   if (!instanceId) {
     console.warn('vpn service skipped because instance id is empty')
@@ -372,6 +469,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
     return
 
   if (!curNetworkInfo) {
+    setMobileVpnPhase('config')
     scheduleVpnReconcile(instanceId, generation, 'network_info_unavailable')
     return
   }
@@ -380,6 +478,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
     console.warn('vpn service skipped because network instance failed', instanceId, curNetworkInfo.error_msg)
     vpnReconcileAttempts = 0
     await doStopVpn()
+    setMobileVpnPhase('error', curNetworkInfo.error_msg)
     return
   }
 
@@ -387,6 +486,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
   const virtual_ip = virtualIpv4?.address?.addr ? Utils.ipv4ToString(virtualIpv4.address) : undefined
 
   if (!virtual_ip || !virtual_ip.length) {
+    setMobileVpnPhase('address')
     scheduleVpnReconcile(
       instanceId,
       generation,
@@ -394,8 +494,6 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
     )
     return
   }
-
-  vpnReconcileAttempts = 0
 
   let network_length = virtualIpv4?.network_length
   if (!network_length) {
@@ -428,21 +526,28 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
       if (!isCurrentVpnReconcile(instanceId, generation))
         return
 
-      await doStartVpn(instanceId, virtual_ip, network_length, routes, dns)
+      await doStartVpn(instanceId, generation, virtual_ip, network_length, routes, dns)
       if (!isCurrentVpnReconcile(instanceId, generation) && activeVpnInstanceId === instanceId) {
         await doStopVpn()
       }
     }
     catch (e) {
+      if (!isCurrentVpnReconcile(instanceId, generation)) return
       if (e instanceof Error && e.message === 'need_prepare') {
         console.info('vpn permission is required before starting the Android VPN service')
         return
       }
       if (e instanceof Error && e.message === 'vpn_permission_denied') {
+        setMobileVpnPhase('error', e.message)
         console.info('vpn permission request was denied or dismissed')
         return
       }
       console.error('start vpn service failed', e)
+      if (!isCurrentVpnReconcile(instanceId, generation)) return
+      const message = e instanceof Error ? e.message : String(e)
+      setMobileVpnPhase('error', message)
+      await doStopVpn(true)
+      scheduleVpnReconcile(instanceId, generation, message)
     }
   }
 }
@@ -464,6 +569,7 @@ function enqueueVpnReconcile(instanceId: string, generation: number) {
 }
 
 export async function onNetworkInstanceChange(instanceId: string) {
+  if (suspended) return
   const generation = beginVpnReconcile(instanceId || undefined)
 
   if (instanceId && await isNoTunEnabled(instanceId)) {
@@ -490,11 +596,10 @@ export async function onNetworkInstanceChange(instanceId: string) {
 }
 
 export async function onNetworkInstanceUpdate(instanceId: string) {
-  if (!instanceId || instanceId !== desiredVpnInstanceId)
+  if (suspended || !instanceId || instanceId !== desiredVpnInstanceId)
     return
 
-  const generation = beginVpnReconcile(instanceId)
-  await enqueueVpnReconcile(instanceId, generation)
+  await enqueueVpnReconcile(instanceId, vpnReconcileGeneration)
 }
 
 async function isNoTunEnabled(instanceId: string | undefined) {
@@ -522,9 +627,13 @@ async function findRunningTunInstanceId() {
 
 export async function initMobileVpnService() {
   await registerVpnServiceListener()
+  const native = await get_vpn_status()
+  networkId = native?.networkId
+  networkAvailable = native?.networkAvailable ?? true
 }
 
 export async function prepareVpnService(instanceId: string) {
+  if (suspended) return
   if (await isNoTunEnabled(instanceId)) {
     return
   }
@@ -537,6 +646,7 @@ export async function prepareVpnService(instanceId: string) {
 }
 
 export async function syncMobileVpnService() {
+  if (suspended) return
   syncVpnStatusFromNative(await get_vpn_status())
   const instanceId = await findRunningTunInstanceId()
   if (instanceId) {
@@ -546,4 +656,65 @@ export async function syncMobileVpnService() {
   }
 
   await onNetworkInstanceChange('')
+}
+
+export async function onPhysicalNetworkChange(payload: unknown) {
+  if (!payload || typeof payload !== 'object' || !('available' in payload)
+    || typeof payload.available !== 'boolean') return
+  const nextId = 'networkId' in payload && typeof payload.networkId === 'string' ? payload.networkId : null
+  const changed = networkId !== undefined && (nextId !== networkId || networkAvailable !== payload.available)
+  networkId = nextId
+  networkAvailable = payload.available
+  if (changed || !networkAvailable) clearTimeout(networkChangeTimer)
+  if (suspended) return
+  if (!networkAvailable) {
+    clearVpnReconcileTimer()
+    setMobileVpnPhase('waiting_network')
+    return
+  }
+  if (!changed) return
+  setMobileVpnPhase('reconnecting')
+  networkChangeTimer = setTimeout(() => {
+    networkChangeTimer = undefined
+    if (suspended) return
+    const generation = beginVpnReconcile(desiredVpnInstanceId)
+    void enqueueVpnTask(async () => {
+      if (suspended || generation !== vpnReconcileGeneration) return
+      await doStopVpn(true)
+      if (suspended || generation !== vpnReconcileGeneration) return
+      await restartMobileNetwork()
+    }).then(() => syncMobileVpnService()).catch(error => {
+      if (!suspended) setMobileVpnPhase('error', String(error))
+    })
+  }, 1000)
+}
+
+// Called by a single non-overlapping monitor, also recovering missed native events.
+export async function refreshMobileVpnStatus() {
+  const native = await get_vpn_status()
+  await onPhysicalNetworkChange({ available: native?.networkAvailable ?? true, networkId: native?.networkId })
+  if (suspended || !networkAvailable || networkChangeTimer) return
+  if (!desiredVpnInstanceId) {
+    await syncMobileVpnService()
+    if (!desiredVpnInstanceId && mobileVpnState.phase === 'config'
+      && Date.now() - mobileVpnState.changedAt > 15000) {
+      mobileVpnState.error = 'config_wait_timeout'
+    }
+    return
+  }
+  if (permissionDenied || vpnReconcileTimer || vpnReconcileAttempts >= VPN_RECONCILE_MAX_ATTEMPTS) return
+  if (!native?.running || !curVpnStatus.running) {
+    if (mobileVpnState.error === 'vpn_permission_denied') return
+    curVpnStatus.running = false
+    await enqueueVpnReconcile(desiredVpnInstanceId, vpnReconcileGeneration)
+    return
+  }
+  const info = (await collectNetworkInfo(desiredVpnInstanceId))?.info?.map?.[desiredVpnInstanceId]
+  if (suspended) return
+  if (info?.error_msg) {
+    setMobileVpnPhase('error', info.error_msg)
+    return
+  }
+  mobileVpnState.peers = info?.peers?.length ?? 0
+  setMobileVpnPhase(mobileVpnState.peers ? 'connected' : 'connecting')
 }

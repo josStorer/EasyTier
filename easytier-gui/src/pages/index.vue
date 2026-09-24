@@ -14,15 +14,20 @@ import {
   initMobileVpnService,
   setMobileVpnTileActionHandler,
   syncMobileVpnService,
+  mobileVpnState,
+  resumeMobileVpn,
+  refreshMobileVpnStatus,
+  setMobileVpnPhase,
 } from '~/composables/mobile_vpn'
-import { executeVpnTileAction } from '~/composables/mobile_vpn_tile'
+import { startMobileConnection, stopMobileConnection } from '~/composables/mobile_connection'
+import { validateConfigServerProfiles } from '~/composables/config_server_profiles'
 import { GUIRemoteClient } from '~/modules/api'
 
 import { useToast, useConfirm } from 'primevue'
 import { loadMode, saveMode, WebClientConfig, type Mode } from '~/composables/mode'
 import { saveLastNetworkInstanceId, loadLastNetworkInstanceId } from '~/composables/config'
 import ModeSwitcher from '~/components/ModeSwitcher.vue'
-import { getEasytierVersion, getServiceStatus } from '~/composables/backend'
+import { getEasytierVersion, getServiceStatus, mobileConnectionEnabled } from '~/composables/backend'
 
 const { t, locale } = useI18n()
 const confirm = useConfirm()
@@ -35,6 +40,17 @@ const manualDisconnect = ref(false)
 
 const configServerDialogVisible = ref(false)
 const configServerConnected = ref(false)
+const editingServerConfig = computed<WebClientConfig>({
+  get: () => editingMode.value as WebClientConfig,
+  set: config => Object.assign(editingMode.value, config),
+})
+const activeProfileName = computed(() => {
+  if (currentMode.value.mode === 'remote') return undefined
+  const mode = currentMode.value
+  const profile = mode.config_server_profiles?.find(item => item.id === mode.selected_config_server_id)
+  // URLs can contain management credentials. Keep them out of the status panel.
+  return profile ? profile.name || t('config-server.unnamed') : undefined
+})
 
 const showAutostartHint = ref(false)
 
@@ -216,19 +232,21 @@ async function initWithMode(mode: Mode) {
   await sendConfigs(running_inst_ids.map(Utils.UuidToStr))
   if (mode.mode === 'normal') {
     mode.config_server_url = mode.config_server_url || undefined
-    initWebClient(mode.config_server_url)
+    await initWebClient(mode.config_server_url)
   }
   currentMode.value = mode
   saveMode(mode)
   clientRunning.value = await isClientRunning()
 }
 
+const cleanupFns: Array<() => void> = []
+onUnmounted(() => cleanupFns.forEach(unlisten => unlisten()))
 onMounted(async () => {
-  const cleanupFns: Array<() => void> = []
 
   if (type() === 'android') {
     try {
       await initMobileVpnService()
+      if (await mobileConnectionEnabled()) resumeMobileVpn()
     } catch (e: any) {
       console.error("easytier init vpn service failed", e)
     }
@@ -249,9 +267,20 @@ onMounted(async () => {
     }
   }
 
-  onUnmounted(() => {
-    cleanupFns.forEach(unlisten => unlisten())
-  })
+  if (type() === 'android') {
+    let polling = false
+    const timer = setInterval(async () => {
+      if (polling) return
+      polling = true
+      try {
+        await consumePendingMobileVpnTileAction()
+        await refreshMobileVpnStatus()
+      } catch (error) {
+        setMobileVpnPhase('error', String(error))
+      } finally { polling = false }
+    }, 2000)
+    cleanupFns.push(() => clearInterval(timer))
+  }
 });
 
 useTray(true)
@@ -263,28 +292,8 @@ const clientRunning = ref(false);
 
 async function handleMobileVpnTileAction(action: 'start' | 'stop') {
   try {
-    const result = await executeVpnTileAction(action, remoteClient.value, {
-      lastInstanceId: loadLastNetworkInstanceId(),
-      syncVpnService: syncMobileVpnService,
-    })
-
-    if (!result.instanceId) {
-      toast.add({
-        severity: 'warn',
-        summary: t('vpn_tile_no_network'),
-        detail: t('vpn_tile_no_network_description'),
-        life: 5000,
-      })
-      return
-    }
-
-    instanceId.value = result.instanceId
-    saveLastNetworkInstanceId(result.instanceId)
-    toast.add({
-      severity: action === 'start' ? 'success' : 'secondary',
-      summary: t(action === 'start' ? 'vpn_tile_started' : 'vpn_tile_stopped'),
-      life: 3000,
-    })
+    if (action === 'stop') await stopMobileConnection()
+    else if (!mobileVpnState.enabled || mobileVpnState.phase === 'error') await startMobileConnection()
   }
   catch (error) {
     console.error('VPN tile action failed', action, error)
@@ -454,6 +463,12 @@ async function openConfigServerDialog() {
   configServerDialogVisible.value = true
 }
 async function onConfigServerSave() {
+  try {
+    validateConfigServerProfiles(editingServerConfig.value)
+  } catch (error) {
+    toast.add({ severity: 'error', summary: t('error'), detail: t(String(error instanceof Error ? error.message : error)), life: 8000 })
+    return
+  }
   if (JSON.stringify(currentMode.value) === JSON.stringify(editingMode.value)) {
     configServerDialogVisible.value = false
     return;
@@ -480,7 +495,22 @@ async function onConfigServerSave() {
       });
     })
   }
-  console.log("Saving config server url", (editingMode.value as WebClientConfig).config_server_url)
+  if (type() === 'android' && editingMode.value.mode === 'normal') {
+    if (isModeSaving.value) return
+    isModeSaving.value = true
+    try {
+      const changed = currentMode.value.mode !== 'normal'
+        || currentMode.value.config_server_url !== editingMode.value.config_server_url
+      if (changed) await stopMobileConnection()
+      currentMode.value = JSON.parse(JSON.stringify(editingMode.value))
+      saveMode(currentMode.value)
+      configServerDialogVisible.value = false
+      if (changed && editingMode.value.config_server_url) await startMobileConnection()
+    } catch (error) {
+      toast.add({ severity: 'error', summary: t('error'), detail: String(error), life: 8000 })
+    } finally { isModeSaving.value = false }
+    return
+  }
   await onModeSave();
   configServerDialogVisible.value = false
 }
@@ -488,7 +518,7 @@ onMounted(() => {
   const timer = setInterval(async () => {
     if (currentMode.value.mode !== 'normal') return;
     if (!currentMode.value.config_server_url) return;
-    configServerConnected.value = await isWebClientConnected();
+    configServerConnected.value = await isWebClientConnected().catch(() => false);
   }, 1000)
 
   onUnmounted(() => {
@@ -502,6 +532,7 @@ const configServerConnectionStatus = computed(() => {
   if (!currentMode.value.config_server_url) {
     return 'disconnected'
   }
+  if (type() === 'android' && !mobileVpnState.enabled) return 'disconnected'
   return configServerConnected.value ? 'connected' : 'connecting'
 })
 
@@ -524,13 +555,8 @@ const configServerConnectionStatus = computed(() => {
     </Dialog>
 
     <Dialog v-model:visible="configServerDialogVisible" modal :header="t('config-server.title')"
-      :style="{ width: '50vw' }">
-      <div class="flex flex-col gap-3">
-        <label for="config-server-address">{{ t('config-server.address') }}</label>
-        <InputText id="config-server-address" v-model="(editingMode as WebClientConfig).config_server_url"
-          :placeholder="t('config-server.address_placeholder')" />
-        <small class="p-text-secondary whitespace-pre-wrap">{{ t('config-server.description') }}</small>
-      </div>
+      :style="{ width: '36rem', maxWidth: 'calc(100vw - 2rem)' }">
+      <ConfigServerProfiles v-model="editingServerConfig" />
       <template #footer>
         <Button :label="t('web.common.cancel')" icon="pi pi-times" @click="configServerDialogVisible = false" text />
         <Button :label="t('web.common.save')" icon="pi pi-save" @click="onConfigServerSave" autofocus
@@ -539,6 +565,8 @@ const configServerConnectionStatus = computed(() => {
     </Dialog>
 
     <Menu ref="log_menu" :model="log_menu_items_popup" :popup="true" />
+
+    <MobileConnectionStatus v-if="type() === 'android'" :profile="activeProfileName" />
 
     <RemoteManagement v-if="clientRunning" class="flex-1 overflow-y-auto" :api="remoteClient"
       :pause-auto-refresh="isModeSaving" v-model:instance-id="instanceId" />

@@ -1,6 +1,7 @@
 name: EasyTier Mobile
 
 on:
+  workflow_dispatch:
   push:
     branches: ["develop", "main", "releases/**"]
   pull_request:
@@ -42,7 +43,7 @@ jobs:
               steps.path_filter.outputs.relevant != 'true'
             )
           ) &&
-          !startsWith(github.ref_name, 'releases/')
+          !startsWith(github.ref_name, 'releases/') && github.event_name != 'workflow_dispatch'
         }}
     steps:
       - id: skip_check
@@ -123,6 +124,14 @@ jobs:
           prefix-key: ""
           shared-key: "gui-registry"
           cache-targets: "false"
+
+      - name: Test mobile connection behavior
+        if: matrix.ARCH == 'aarch64'
+        run: |
+          pnpm --filter easytier-gui test:mobile-vpn
+          pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts
+          rustc --edition 2024 --test easytier-gui/src-tauri/src/connection_intent.rs -o /tmp/easytier-connection-intent-tests
+          /tmp/easytier-connection-intent-tests
 
       - name: Build
         run: |

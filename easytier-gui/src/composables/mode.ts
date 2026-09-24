@@ -1,8 +1,7 @@
 import { type } from '@tauri-apps/plugin-os';
+import { normalizeConfigServerProfiles, type ConfigServerSettings } from './config_server_profiles';
 
-export interface WebClientConfig {
-    config_server_url?: string
-}
+export interface WebClientConfig extends ConfigServerSettings {}
 
 export interface NormalMode extends WebClientConfig {
     mode: 'normal'
@@ -36,9 +35,10 @@ export function loadMode(): Mode {
     if (modeStr) {
         let mode = JSON.parse(modeStr) as Mode
         if (type() === 'android') {
-            return { ...mode, mode: 'normal' }
+            const normal: NormalMode = { ...mode, mode: 'normal' }
+            return normalizeConfigServerProfiles(normal)
         }
-        return mode
+        return mode.mode === 'remote' ? mode : normalizeConfigServerProfiles(mode)
     } else {
         return { mode: 'normal' }
     }

@@ -61,7 +61,7 @@ class EasyTierVpnTileService : TileService() {
     }
 
     private fun handleClick() {
-        val action = pendingAction(this) ?: if (TauriVpnService.self == null) ACTION_START else ACTION_STOP
+        val action = pendingAction(this) ?: if (TauriVpnService.self?.tunnelFd == null) ACTION_START else ACTION_STOP
         savePendingAction(this, action)
         updateTileState()
 
@@ -74,7 +74,7 @@ class EasyTierVpnTileService : TileService() {
 
     private fun updateTileState() {
         qsTile?.apply {
-            state = if (TauriVpnService.self == null) Tile.STATE_INACTIVE else Tile.STATE_ACTIVE
+            state = if (TauriVpnService.self?.tunnelFd == null) Tile.STATE_INACTIVE else Tile.STATE_ACTIVE
             updateTile()
         }
     }

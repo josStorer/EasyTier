@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   const listeners = new Map<string, (payload: unknown) => Promise<void>>()
@@ -21,7 +21,8 @@ const mocks = vi.hoisted(() => {
     listNetworkInstanceIds: vi.fn<() => Promise<{ running_inst_ids: unknown[] }>>(async () => ({ running_inst_ids: [] })),
     prepareVpn: vi.fn(async () => ({ granted: true })),
     setTunFd: vi.fn(async () => undefined),
-    startVpn: vi.fn(async () => {
+    restartMobileNetwork: vi.fn(async () => undefined),
+    startVpn: vi.fn(async (_request: Record<string, unknown>) => {
       await listeners.get('vpn_service_start')?.({ fd: 1 })
       return {}
     }),
@@ -56,6 +57,7 @@ vi.mock('./backend', () => ({
   getConfig: mocks.getConfig,
   listNetworkInstanceIds: mocks.listNetworkInstanceIds,
   setTunFd: mocks.setTunFd,
+  restartMobileNetwork: mocks.restartMobileNetwork,
 }))
 
 function setConfig(instanceId: string, noTun = false) {
@@ -82,6 +84,7 @@ function setReady(instanceId: string, ipv4: string) {
 async function loadVpnModule() {
   const mobileVpn = await import('./mobile_vpn')
   await mobileVpn.initMobileVpnService()
+  mobileVpn.resumeMobileVpn()
   return mobileVpn
 }
 
@@ -100,11 +103,22 @@ beforeEach(() => {
   mocks.getVpnStatus.mockResolvedValue({ running: false })
   mocks.listNetworkInstanceIds.mockReset()
   mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: [] })
-  mocks.prepareVpn.mockClear()
-  mocks.setTunFd.mockClear()
-  mocks.startVpn.mockClear()
-  mocks.stopVpn.mockClear()
+  mocks.prepareVpn.mockReset().mockResolvedValue({ granted: true })
+  mocks.setTunFd.mockReset().mockResolvedValue(undefined)
+  mocks.restartMobileNetwork.mockReset().mockResolvedValue(undefined)
+  mocks.startVpn.mockReset().mockImplementation(async request => {
+    mocks.getVpnStatus.mockResolvedValue({ running: true, fd: 1, ...request })
+    await mocks.listeners.get('vpn_service_start')?.({ fd: 1, requestId: request.requestId })
+    return {}
+  })
+  mocks.stopVpn.mockReset().mockImplementation(async () => {
+    mocks.getVpnStatus.mockResolvedValue({ running: false })
+    await mocks.listeners.get('vpn_service_stop')?.({})
+    return {}
+  })
 })
+
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
 
 describe('mobile VPN reconciliation ownership', () => {
   it('stops A before retrying an unavailable B, then starts B when it becomes ready', async () => {
@@ -251,5 +265,134 @@ describe('mobile VPN tile action delivery', () => {
 
     expect(await vpn.consumePendingMobileVpnTileAction()).toBe(true)
     expect(handler).toHaveBeenCalledWith('start')
+  })
+})
+
+describe('mobile VPN recovery and cancellation', () => {
+  it('retries startup when network info is not ready yet', async () => {
+    setConfig('A')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    expect(vpn.mobileVpnState.phase).toBe('config')
+    setReady('A', '10.0.0.1')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(mocks.setTunFd).toHaveBeenCalledWith(1, 'A')
+    expect(vpn.mobileVpnState.ipv4).toBe('10.0.0.1')
+  })
+
+  it('does not need a start event to discover and attach an established VPN', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.startVpn.mockImplementationOnce(async request => {
+      mocks.getVpnStatus.mockResolvedValue({ running: true, fd: 0, ...request })
+      return {}
+    })
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.setTunFd).toHaveBeenCalledWith(0, 'A')
+    expect(vpn.mobileVpnState.phase).toBe('connecting')
+  })
+
+  it('reports TUN attachment failure and closes the unusable VPN', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.setTunFd.mockRejectedValueOnce(new Error('attachment failed'))
+    await vpn.onNetworkInstanceChange('A')
+    expect(vpn.mobileVpnState.phase).toBe('error')
+    expect(vpn.mobileVpnState.error).toBe('attachment failed')
+    expect(mocks.stopVpn).toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(vpn.mobileVpnState.phase).toBe('connecting')
+  })
+
+  it('stays stopped after a scheduled retry, network change, or late instance event', async () => {
+    setConfig('A')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.suspendMobileVpn()
+    setReady('A', '10.0.0.1')
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'cellular' })
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(mocks.startVpn).not.toHaveBeenCalled()
+    expect(mocks.restartMobileNetwork).not.toHaveBeenCalled()
+    expect(vpn.mobileVpnState.phase).toBe('stopped')
+  })
+
+  it.each([true, false])('stops while permission is pending and ignores the late result %s', async (granted) => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    let approve!: (value: { granted: boolean }) => void
+    mocks.startVpn.mockResolvedValueOnce({ errorMsg: 'need_prepare' })
+    mocks.prepareVpn.mockImplementationOnce(() => new Promise(resolve => { approve = resolve }))
+    const starting = vpn.onNetworkInstanceChange('A')
+    await vi.advanceTimersByTimeAsync(0)
+    await vpn.suspendMobileVpn()
+    expect(vpn.mobileVpnState.phase).toBe('stopped')
+    approve({ granted })
+    await starting
+    expect(vpn.mobileVpnState.phase).toBe('stopped')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(1)
+    expect(mocks.setTunFd).not.toHaveBeenCalled()
+  })
+
+  it('does not repeatedly request denied permission', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.startVpn.mockResolvedValueOnce({ errorMsg: 'need_prepare' })
+    mocks.prepareVpn.mockResolvedValue({ granted: false })
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.refreshMobileVpnStatus()
+    await vpn.onNetworkInstanceUpdate('A')
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(mocks.prepareVpn).toHaveBeenCalledTimes(1)
+    expect(vpn.mobileVpnState.error).toBe('vpn_permission_denied')
+  })
+
+  it('times out a stale native start without attaching its fd', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.startVpn.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockResolvedValue({ running: true, fd: 9, requestId: 'stale' })
+      return {}
+    })
+    const starting = vpn.onNetworkInstanceChange('A')
+    await vi.advanceTimersByTimeAsync(10100)
+    await starting
+    expect(mocks.setTunFd).not.toHaveBeenCalled()
+    expect(vpn.mobileVpnState.error).toBe('vpn_start_timeout')
+  })
+
+  it('coalesces rapid physical network changes and ignores repeated snapshots', async () => {
+    const vpn = await loadVpnModule()
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'wifi' })
+    await vpn.onPhysicalNetworkChange({ available: false })
+    expect(vpn.mobileVpnState.phase).toBe('waiting_network')
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'cellular' })
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'cellular' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mocks.restartMobileNetwork).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels debounced network recovery on manual stop', async () => {
+    const vpn = await loadVpnModule()
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'wifi' })
+    await vpn.onPhysicalNetworkChange({ available: true, networkId: 'cellular' })
+    await vpn.suspendMobileVpn()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(mocks.restartMobileNetwork).not.toHaveBeenCalled()
+  })
+
+  it('honors a pending tile stop over a simultaneous launcher start', async () => {
+    const vpn = await loadVpnModule()
+    const handler = vi.fn(async () => undefined)
+    vpn.setMobileVpnTileActionHandler(handler)
+    mocks.consumeVpnTileAction.mockResolvedValue({ action: 'stop', launchRequested: true })
+    await vpn.consumePendingMobileVpnTileAction()
+    expect(handler).toHaveBeenCalledWith('stop')
   })
 })

@@ -18,40 +18,61 @@ import app.tauri.plugin.JSObject
 class TauriVpnService : VpnService() {
     companion object {
         @JvmField var triggerCallback: (String, JSObject) -> Unit = { _, _ -> }
-        @JvmField var self: TauriVpnService? = null
+        @Volatile @JvmField var self: TauriVpnService? = null
         @JvmField var ipv4Addr: String? = null
         @JvmField var routes: Array<String> = emptyArray()
         @JvmField var dns: String? = null
+        @Volatile @JvmField var requestId: String? = null
+        @Volatile @JvmField var pendingRequestId: String? = null
+        @Volatile @JvmField var errorMsg: String? = null
 
         const val IPV4_ADDR = "IPV4_ADDR"
         const val ROUTES = "ROUTES"
         const val DNS = "DNS"
         const val DISALLOWED_APPLICATIONS = "DISALLOWED_APPLICATIONS"
         const val MTU = "MTU"
+        const val REQUEST_ID = "REQUEST_ID"
 
         private const val NOTIFICATION_CHANNEL_ID = "easytier_vpn_channel"
         private const val NOTIFICATION_ID = 1356
     }
 
-    private lateinit var vpnInterface: ParcelFileDescriptor
+    @Volatile private var vpnInterface: ParcelFileDescriptor? = null
+
+    val tunnelFd: Int? get() = vpnInterface?.fd
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         println("vpn on start command ${intent?.getExtras()} $intent")
-        startVpnForegroundService()
-        var args = intent?.getExtras()
-        ipv4Addr = args?.getString(IPV4_ADDR)
-        routes = args?.getStringArray(ROUTES) ?: emptyArray()
-        dns = args?.getString(DNS)
-
-        vpnInterface = createVpnInterface(args)
-        println("vpn created ${vpnInterface.fd}")
-
-        var event_data = JSObject()
-        event_data.put("fd", vpnInterface.fd)
-        triggerCallback("vpn_service_start", event_data)
+        val args = intent?.extras
+        val requestedId = args?.getString(REQUEST_ID)
+        // A queued start may arrive after Stop. Never recreate a default VPN from
+        // a null sticky-service intent or from a superseded request.
+        if (requestedId == null || requestedId != pendingRequestId) {
+            if (vpnInterface == null) stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+        try {
+            startVpnForegroundService()
+            disconnect()
+            self = this
+            requestId = requestedId
+            errorMsg = null
+            vpnInterface = createVpnInterface(args)
+            ipv4Addr = args?.getString(IPV4_ADDR)
+            routes = args?.getStringArray(ROUTES) ?: emptyArray()
+            dns = args?.getString(DNS)
+            triggerCallback("vpn_service_start", JSObject().apply {
+                put("fd", tunnelFd)
+                put("requestId", requestId)
+            })
+        } catch (error: Exception) {
+            errorMsg = error.message ?: error.javaClass.simpleName
+            disconnect()
+            triggerCallback("vpn_service_error", JSObject().apply { put("errorMsg", errorMsg) })
+            stopSelfResult(startId)
+        }
         EasyTierVpnTileService.requestStateUpdate(this)
-
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onCreate() {
@@ -63,7 +84,7 @@ class TauriVpnService : VpnService() {
     override fun onDestroy() {
         println("vpn on destroy")
         disconnect()
-        setMainForegroundServiceEnabled(true)
+        // A manual stop must not start another keepalive service.
         stopForeground(STOP_FOREGROUND_REMOVE)
         self = null
         EasyTierVpnTileService.requestStateUpdate(this)
@@ -73,7 +94,7 @@ class TauriVpnService : VpnService() {
     override fun onRevoke() {
         println("vpn on revoke")
         disconnect()
-        setMainForegroundServiceEnabled(true)
+        pendingRequestId = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         self = null
         EasyTierVpnTileService.requestStateUpdate(this)
@@ -81,9 +102,10 @@ class TauriVpnService : VpnService() {
     }
 
     private fun disconnect() {
-        if (self == this && this::vpnInterface.isInitialized) {
+        if (vpnInterface != null) {
             triggerCallback("vpn_service_stop", JSObject())
-            vpnInterface.close()
+            vpnInterface?.close()
+            vpnInterface = null
         }
         clearStatus()
     }
@@ -164,8 +186,8 @@ class TauriVpnService : VpnService() {
                 .setSession("TauriVpnService")
                 .setBlocking(false)
         
-        var mtu = args?.getInt(MTU) ?: 1500
-        var ipv4Addr = args?.getString(IPV4_ADDR) ?: "10.126.126.1/24"
+        var mtu = args?.getInt(MTU, 1300) ?: 1300
+        var ipv4Addr = requireNotNull(args?.getString(IPV4_ADDR)) { "Missing VPN address" }
         var dns: String? = args?.getString(DNS)
         var routes = args?.getStringArray(ROUTES) ?: emptyArray()
         var disallowedApplications = args?.getStringArray(DISALLOWED_APPLICATIONS) ?: emptyArray()

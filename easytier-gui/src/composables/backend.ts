@@ -87,8 +87,20 @@ export async function setLoggingLevel(level: string) {
   return await invoke('set_logging_level', { level })
 }
 
-export async function setTunFd(fd: number) {
-  return await invoke('set_tun_fd', { fd })
+export async function setTunFd(fd: number, instanceId?: string) {
+  return await invoke('set_tun_fd', { fd, instanceId })
+}
+
+export function mobileConnectionEnabled() {
+  return invoke<boolean>('mobile_connection_enabled')
+}
+
+export function setMobileConnectionEnabled(enabled: boolean) {
+  return invoke<void>('set_mobile_connection_enabled', { enabled })
+}
+
+export function restartMobileNetwork() {
+  return invoke<void>('restart_mobile_network')
 }
 
 export async function getEasytierVersion() {

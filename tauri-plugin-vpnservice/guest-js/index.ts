@@ -14,6 +14,7 @@ export interface InvokeResponse {
 }
 
 export interface StartVpnRequest {
+  requestId?: string;
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;
@@ -23,6 +24,11 @@ export interface StartVpnRequest {
 
 export interface VpnStatusResponse {
   running: boolean;
+  fd?: number;
+  requestId?: string;
+  errorMsg?: string;
+  networkAvailable?: boolean;
+  networkId?: string;
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;
@@ -32,6 +38,7 @@ export type VpnTileAction = 'start' | 'stop';
 
 export interface VpnTileActionResponse {
   action?: VpnTileAction;
+  launchRequested?: boolean;
 }
 
 export async function prepare_vpn(): Promise<InvokeResponse | null> {

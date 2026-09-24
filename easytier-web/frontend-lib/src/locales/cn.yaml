@@ -85,6 +85,31 @@ logging_level_trace: 跟踪
 logging_level_off: 关闭
 logging_open_dir: 打开日志目录
 logging_copy_dir: 复制日志路径
+mobile-vpn:
+  stopped: 已停止
+  stopped_hint: 已取消自动重连。点击连接或下次从桌面打开 App 时再连接。
+  permission: 等待 VPN 授权
+  config: 正在连接配置服务器或加载网络
+  config_wait_timeout: 超过 15 秒仍未收到可运行的配置，请检查手机网络、服务器地址及服务器下发的配置。
+  address: 正在等待虚拟 IP
+  starting: 正在建立系统 VPN
+  connecting: VPN 已建立，等待节点连接
+  connected: VPN 已建立，节点已连接
+  waiting_network: 等待手机网络恢复
+  reconnecting: 网络已切换，正在重新连接
+  error: 连接遇到问题
+  connect: 连接 / 重试
+  stop: 停止
+  peers: '已连接节点：{count}'
+  retry_progress: '正在重试：{count} / {max}'
+  vpn_permission_denied: VPN 授权被拒绝或取消。点击连接后重新授权。
+  vpn_start_timeout: 系统 VPN 启动超时，正在尝试恢复。
+  vpn_fd_unavailable: 系统 VPN 未提供有效虚拟网卡。
+  vpn_no_network: 请先添加 URL 配置或创建一个本地网络。
+  network_info_unavailable: 网络实例尚未准备好，请检查配置服务器和节点连接。
+  dhcp_ipv4_unavailable: 尚未取得虚拟 IP，请检查节点连通性和地址配置。
+  static_ipv4_unavailable: 未取得静态虚拟 IP，请检查网络配置。
+
 vpn_tile_no_network: 没有已配置的网络
 vpn_tile_no_network_description: 请先在 EasyTier 中配置网络，再使用 VPN 快捷磁贴。
 vpn_tile_started: VPN 网络已启动
@@ -469,6 +494,16 @@ mode:
   autostart_hint: 开机自启由服务模式提供。切换为「服务模式」并保存后，EasyTier 将注册为系统服务，开机自动启动并在后台运行。
 
 config-server:
+  active_profile: 当前配置
+  profile_name: 配置名称（可选）
+  unnamed: 未命名配置
+  no_profile: 不连接配置服务器
+  no_profiles: 还没有保存的配置，请添加一个地址。
+  add_profile: 添加配置
+  remove_profile: 删除配置
+  invalid_address: 地址不能为空或包含空白字符。
+  duplicate_address: 配置地址不能重复。
+  missing_selection: 选中的配置已不存在，请重新选择。
   title: 配置服务器
   address: 配置服务器地址
   address_placeholder: 例如：udp://127.0.0.1:22020/admin 或 admin
