@@ -132,6 +132,7 @@ jobs:
           pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts tests/gui-mobile-status.spec.ts
           rustc --edition 2024 --test easytier-gui/src-tauri/src/connection_intent.rs -o /tmp/easytier-connection-intent-tests
           /tmp/easytier-connection-intent-tests
+          cargo test -p easytier-core --lib mobile_config_pushes_preserve_instances_and_do_not_reenter_the_mutation_lock --locked
 
       - name: Build
         run: |

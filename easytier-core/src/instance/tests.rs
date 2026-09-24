@@ -1945,6 +1945,153 @@ virtual_ip = "10.82.0.2/24"
 
     #[cfg(feature = "management")]
     #[tokio::test]
+    async fn mobile_config_pushes_preserve_instances_and_do_not_reenter_the_mutation_lock() {
+        use crate::{
+            config::api_input::NetworkConfigExt as _,
+            config::toml::{ConfigSource, TomlConfig},
+            instance::manager::InstanceFactory,
+            management::{
+                InstanceManager, InstanceMutationHooks, ProcessManagement,
+                UnsupportedConfigFileStorage,
+            },
+        };
+        use easytier_proto::api::manage::{NetworkConfig, NetworkingMethod};
+
+        struct MobileTestFactory(Arc<CoreProcessRuntime>);
+        impl InstanceFactory for MobileTestFactory {
+            type Instance = CoreInstance<TestHost>;
+            type CreateContext = ();
+            type Error = anyhow::Error;
+            fn create(&self, config: TomlConfig, (): ()) -> anyhow::Result<Arc<Self::Instance>> {
+                let (sink, _receiver) = tokio::sync::mpsc::channel(16);
+                CoreInstance::from_toml(
+                    config,
+                    adapters_with_process_runtime(None, Arc::new(sink), self.0.clone()),
+                )
+            }
+        }
+
+        struct MobileHooks {
+            instances: Arc<InstanceManager<MobileTestFactory>>,
+            calls: AtomicUsize,
+            reject: AtomicBool,
+        }
+        #[async_trait]
+        impl InstanceMutationHooks for MobileHooks {
+            fn skip_unchanged_config(&self) -> bool {
+                true
+            }
+            async fn pre_run_network_instance(&self, config: &TomlConfig) -> Result<(), String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(self.instances.mutation_lock().try_lock().is_err());
+                if self.reject.load(Ordering::SeqCst) {
+                    return Err("connection stopped".into());
+                }
+                // Same transaction as the Android callback: never stop the
+                // incoming ID or issue a second management RPC from this hook.
+                let others = self
+                    .instances
+                    .instance_ids()
+                    .into_iter()
+                    .filter(|id| *id != config.get_id())
+                    .collect::<Vec<_>>();
+                self.instances
+                    .delete_network_instances(others)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            }
+        }
+        let instances = Arc::new(InstanceManager::new(
+            MobileTestFactory(CoreProcessRuntime::new()),
+            Some(tokio::runtime::Handle::current()),
+        ));
+        let hooks = Arc::new(MobileHooks {
+            instances: instances.clone(),
+            calls: AtomicUsize::new(0),
+            reject: AtomicBool::new(false),
+        });
+        let management = ProcessManagement::new(
+            instances.clone(),
+            hooks.clone(),
+            Arc::new(UnsupportedConfigFileStorage),
+        );
+        let id = uuid::Uuid::new_v4();
+        let request = NetworkConfig {
+            instance_id: Some(id.to_string()),
+            network_name: Some("mobile".into()),
+            networking_method: Some(NetworkingMethod::Standalone.into()),
+            no_tun: Some(false),
+            ..Default::default()
+        };
+        let config = request.gen_config().unwrap();
+        let source = Some(ConfigSource::Web);
+        management
+            .run_network_instance(config.clone(), Some(id), true, source)
+            .await
+            .unwrap();
+        let original = instances.instance(id).unwrap();
+
+        let (first, second) = tokio::join!(
+            management.run_network_instance(request.gen_config().unwrap(), Some(id), true, source),
+            management.run_network_instance(request.gen_config().unwrap(), Some(id), true, source),
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(hooks.calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&original, &instances.instance(id).unwrap()));
+
+        // A cancelled/failed pre-run preserves the existing core. A later
+        // corrected push must still be able to replace it.
+        let changed = TomlConfig::new_from_str(&config.dump()).unwrap();
+        changed.set_inst_name("mobile-updated".into());
+        hooks.reject.store(true, Ordering::SeqCst);
+        assert!(
+            management
+                .run_network_instance(changed.clone(), Some(id), true, source)
+                .await
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&original, &instances.instance(id).unwrap()));
+        hooks.reject.store(false, Ordering::SeqCst);
+        management
+            .run_network_instance(changed.clone(), Some(id), true, source)
+            .await
+            .unwrap();
+        let replacement = instances.instance(id).unwrap();
+        assert!(!Arc::ptr_eq(&original, &replacement));
+
+        // Explicit restarts from other callers retain their existing behavior.
+        let explicit = ProcessManagement::new(
+            instances.clone(),
+            Arc::new(()),
+            Arc::new(UnsupportedConfigFileStorage),
+        );
+        explicit
+            .run_network_instance(changed.clone(), Some(id), true, source)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&replacement, &instances.instance(id).unwrap()));
+
+        let next = TomlConfig::new_from_str(&changed.dump()).unwrap();
+        let next_id = uuid::Uuid::new_v4();
+        next.set_id(next_id);
+        // Switching away from a live instance completes under the held lock;
+        // the old nested-delete RPC would time out here instead.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            management.run_network_instance(next, Some(next_id), true, source),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(instances.instance(id).is_none());
+        assert!(instances.instance(next_id).is_some());
+        instances.delete_network_instances([next_id]).await.unwrap();
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
     async fn owned_selection_and_cleanup_share_the_canonical_transaction() {
         use crate::{
             config::toml::TomlConfig,

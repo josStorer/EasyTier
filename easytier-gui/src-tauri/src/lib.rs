@@ -176,7 +176,12 @@ async fn run_network_instance(
     let client_manager = get_client_manager!()?;
     let toml_config = cfg.gen_config().map_err(|e| e.to_string())?;
     client_manager
-        .pre_run_network_instance_hook(&app, &toml_config, manager::PersistedConfigSource::User)
+        .pre_run_network_instance_hook(
+            &app,
+            &toml_config,
+            manager::PersistedConfigSource::User,
+            manager::RunOrigin::Local,
+        )
         .await?;
     client_manager
         .handle_run_network_instance(app.clone(), cfg, save)
@@ -412,6 +417,7 @@ async fn update_network_config_state(
                 &app,
                 &toml_config,
                 manager::PersistedConfigSource::from_runtime_source(source),
+                manager::RunOrigin::Local,
             )
             .await?;
     }
@@ -965,6 +971,10 @@ mod manager {
 
     #[async_trait]
     impl WebClientHooks for GuiHooks {
+        fn skip_unchanged_config(&self) -> bool {
+            cfg!(target_os = "android") && self.is_current()
+        }
+
         async fn pre_run_network_instance(
             &self,
             cfg: &easytier::common::config::TomlConfigLoader,
@@ -978,6 +988,7 @@ mod manager {
                     &self.app,
                     cfg,
                     PersistedConfigSource::from_runtime_source(cfg.get_network_config_source()),
+                    RunOrigin::ConfigServer,
                 )
                 .await?;
             if !self.is_current() {
@@ -1011,6 +1022,13 @@ mod manager {
                 .post_remote_remove_network_instances_hook(&self.app, ids)
                 .await
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum RunOrigin {
+        Local,
+        // ProcessManagement already holds the instance mutation lock here.
+        ConfigServer,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1049,7 +1067,6 @@ mod manager {
             }
         }
 
-        #[cfg(any(test, target_os = "android"))]
         fn is_web_like(self) -> bool {
             matches!(self, Self::Web)
         }
@@ -1317,6 +1334,7 @@ mod manager {
             app: &AppHandle,
             cfg: &easytier::common::config::TomlConfigLoader,
             source: PersistedConfigSource,
+            origin: RunOrigin,
         ) -> Result<(), String> {
             if cfg!(target_os = "android")
                 && !cfg.get_flags().no_tun
@@ -1325,26 +1343,62 @@ mod manager {
                 return Err("mobile_connection_stopped".to_string());
             }
             let instance_id = cfg.get_id();
-            app.emit("pre_run_network_instance", instance_id.to_string())
-                .map_err(|e| e.to_string())?;
+            tracing::info!(target: "mobile_vpn", %instance_id, ?source, ?origin, "preparing network instance");
 
-            #[cfg(target_os = "android")]
-            if !cfg.get_flags().no_tun {
-                match source {
-                    PersistedConfigSource::User | PersistedConfigSource::Legacy => {
-                        self.disable_instances_with_tun(app, false)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    PersistedConfigSource::Web => {
-                        self.disable_instances_with_tun(app, true)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        if self.get_enabled_instances_with_tun_ids().next().is_some() {
-                            return Err(
-                                "Android only supports one active TUN network; user-managed VPN remains active"
-                                    .to_string(),
-                            );
+            // Keep this portable branch type-checked on desktop builds too.
+            if cfg!(target_os = "android") && !cfg.get_flags().no_tun {
+                let active: Vec<_> = self.get_enabled_instances_with_tun_ids().collect();
+                // Check ownership before touching any running network. A web push
+                // must not evict a user-owned VPN, including one with the same ID.
+                if source.is_web_like()
+                    && active.iter().any(|id| {
+                        self.storage
+                            .network_configs
+                            .get(id)
+                            .is_some_and(|c| !c.source.is_web_like())
+                    })
+                {
+                    return Err("Android only supports one active TUN network; user-managed VPN remains active".to_string());
+                }
+                let other_ids: Vec<_> =
+                    active.into_iter().filter(|id| *id != instance_id).collect();
+                if !other_ids.is_empty() {
+                    tracing::info!(target: "mobile_vpn", %instance_id, ?other_ids, ?origin, "stopping other TUN instances");
+                    match origin {
+                        RunOrigin::ConfigServer => {
+                            let instances = super::INSTANCE_MANAGER
+                                .read()
+                                .await
+                                .clone()
+                                .ok_or("Local instance manager unavailable")?;
+                            for id in &other_ids {
+                                if instances
+                                    .config_control(*id)
+                                    .is_some_and(|c| !c.is_deletable())
+                                {
+                                    return Err(format!("TUN instance {id} cannot be stopped"));
+                                }
+                            }
+                            // The caller holds the same lock used by local RPC.
+                            // Await cleanup directly; a nested delete RPC would
+                            // time out and leave a detached deletion queued behind us.
+                            instances
+                                .delete_network_instances(other_ids.clone())
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            for id in other_ids {
+                                self.storage.enabled_networks.remove(&id);
+                            }
+                            self.storage
+                                .save_enabled_networks(app)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        RunOrigin::Local => {
+                            for id in other_ids {
+                                self.handle_update_network_state(app.clone(), id, true)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
                         }
                     }
                 }
@@ -1357,6 +1411,9 @@ mod manager {
                     NetworkConfig::new_from_config(cfg).map_err(|e| e.to_string())?,
                     source,
                 )
+                .map_err(|e| e.to_string())?;
+
+            app.emit("pre_run_network_instance", instance_id.to_string())
                 .map_err(|e| e.to_string())?;
 
             Ok(())
@@ -1501,9 +1558,14 @@ mod manager {
                         continue;
                     };
                     let toml_config = config.gen_config()?;
-                    self.pre_run_network_instance_hook(&app, &toml_config, source)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?;
+                    self.pre_run_network_instance_hook(
+                        &app,
+                        &toml_config,
+                        source,
+                        RunOrigin::Local,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
                     client
                         .run_network_instance(
                             BaseController::default(),

@@ -33,6 +33,12 @@ use super::{
 
 #[async_trait::async_trait]
 pub trait InstanceMutationHooks: Send + Sync + 'static {
+    /// Hosts may treat repeated config-server pushes as idempotent. Explicit
+    /// restart RPCs retain their existing semantics unless the host opts in.
+    fn skip_unchanged_config(&self) -> bool {
+        false
+    }
+
     fn manages_remote_config_instances(&self) -> bool {
         false
     }
@@ -250,6 +256,15 @@ where
                 .instances
                 .config(instance_id)
                 .map(|config| (config, control.clone()));
+            if self.hooks.skip_unchanged_config()
+                && error_message.is_empty()
+                && restore_instance
+                    .as_ref()
+                    .is_some_and(|(previous, _)| previous.dump() == config.dump())
+            {
+                tracing::info!(%instance_id, "unchanged instance configuration; keeping running instance");
+                return Ok(instance_id);
+            }
             control
         } else if let Some(config_dir) = self.instances.config_dir() {
             config.set_network_config_source(requested_source);

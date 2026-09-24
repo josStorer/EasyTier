@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     prepareVpn: vi.fn(async () => ({ granted: true })),
     setTunFd: vi.fn(async () => undefined),
     restartMobileNetwork: vi.fn<() => Promise<void>>(async () => undefined),
+    logMobileVpnDiagnostic: vi.fn(async (_snapshot: Record<string, unknown>) => undefined),
     startVpn: vi.fn(async (_request: Record<string, unknown>) => {
       await listeners.get('vpn_service_start')?.({ fd: 1 })
       return {}
@@ -54,7 +55,7 @@ vi.mock('tauri-plugin-vpnservice-api', () => ({
 }))
 
 vi.mock('./backend', () => ({
-  logMobileVpnDiagnostic: vi.fn(async () => undefined),
+  logMobileVpnDiagnostic: mocks.logMobileVpnDiagnostic,
   collectNetworkInfo: mocks.collectNetworkInfo,
   getConfig: mocks.getConfig,
   listNetworkInstanceIds: mocks.listNetworkInstanceIds,
@@ -108,6 +109,7 @@ beforeEach(() => {
   mocks.prepareVpn.mockReset().mockResolvedValue({ granted: true })
   mocks.setTunFd.mockReset().mockResolvedValue(undefined)
   mocks.restartMobileNetwork.mockReset().mockResolvedValue(undefined)
+  mocks.logMobileVpnDiagnostic.mockClear()
   mocks.startVpn.mockReset().mockImplementation(async request => {
     mocks.getVpnStatus.mockResolvedValue({ running: true, fd: 1, ...request })
     await mocks.listeners.get('vpn_service_start')?.({ fd: 1, requestId: request.requestId })
@@ -123,6 +125,57 @@ beforeEach(() => {
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
 
 describe('mobile VPN reconciliation ownership', () => {
+  it('does not recheck permission for the running owner, but rebinds TUN when its core is replaced', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.prepareVpn.mockClear()
+    await vpn.prepareVpnService('A')
+    await vpn.prepareVpnService('A')
+    expect(mocks.prepareVpn).not.toHaveBeenCalled()
+    expect(mocks.stopVpn).not.toHaveBeenCalled()
+    // Ordinary status sync preserves the current descriptor.
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(1)
+    // An actual backend post-run event replaces it even with identical config.
+    await vpn.onNetworkInstanceChange('A', true)
+    expect(mocks.stopVpn).toHaveBeenCalledTimes(1)
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+    await vpn.suspendMobileVpn()
+    await vpn.onNetworkInstanceChange('A', true)
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps periodic health snapshots while startup events arrive every two seconds', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.refreshMobileVpnStatus()
+    mocks.logMobileVpnDiagnostic.mockClear()
+    for (let i = 0; i < 9; i++) {
+      await vi.advanceTimersByTimeAsync(2000)
+      vpn.setMobileVpnPhase('permission')
+      await vpn.refreshMobileVpnStatus()
+    }
+    const snapshots = mocks.logMobileVpnDiagnostic.mock.calls.map(([snapshot]) => snapshot)
+      .filter(snapshot => snapshot.reason === 'waiting_heartbeat')
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots[0]).toMatchObject({ nativeRunning: true, instanceId: 'A', routes: 0 })
+  })
+
+  it('preserves a core replacement rebind when an ordinary sync overtakes its event', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    await Promise.all([vpn.onNetworkInstanceChange('A', true), vpn.onNetworkInstanceChange('A')])
+    expect(mocks.stopVpn).toHaveBeenCalledTimes(1)
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+  })
+
   it('stops A before retrying an unavailable B, then starts B when it becomes ready', async () => {
     setConfig('A')
     setConfig('B')

@@ -29,6 +29,7 @@ const VPN_RECONCILE_MAX_ATTEMPTS = 60
 
 let desiredVpnInstanceId: string | undefined
 let activeVpnInstanceId: string | undefined
+let pendingTunRebindInstanceId: string | undefined
 let vpnReconcileGeneration = 0
 let vpnReconcileAttempts = 0
 let vpnReconcileQueue: Promise<void> = Promise.resolve()
@@ -44,7 +45,7 @@ let health = createMobileHealth()
 let recovering = false
 let recoveryBlocked = false
 const diagnosticSession = crypto.randomUUID()
-let lastDiagnosticAt = 0
+let lastHealthSnapshotAt = 0
 
 export const mobileVpnState = reactive({
   enabled: false,
@@ -67,7 +68,6 @@ export function setMobileVpnPhase(phase: string, error = '') {
 }
 
 function diagnostic(reason: string, native?: { running?: boolean, fd?: number }, info?: NetworkTypes.NetworkInstanceRunningInfo) {
-  lastDiagnosticAt = Date.now()
   // Only allowlisted metadata crosses the bridge: no config URLs, keys or packets.
   void logMobileVpnDiagnostic({
     session: diagnosticSession, generation: vpnReconcileGeneration,
@@ -99,6 +99,7 @@ export function resumeMobileVpn() {
 
 export async function suspendMobileVpn() {
   suspended = true
+  pendingTunRebindInstanceId = undefined
   mobileVpnState.enabled = false
   beginVpnReconcile()
   clearTimeout(networkChangeTimer)
@@ -371,6 +372,7 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
   curVpnStatus.routes = routes
   curVpnStatus.dns = dns
   activeVpnInstanceId = instanceId
+  pendingTunRebindInstanceId = undefined
   mobileVpnState.ipv4 = ipv4Addr
   mobileVpnState.attempt = 0
   vpnReconcileAttempts = 0
@@ -548,7 +550,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
   const routesChanged = JSON.stringify(routes) !== JSON.stringify(curVpnStatus.routes)
   const dnsChanged = dns != curVpnStatus.dns
   const configChanged = ipChanged || cidrChanged || routesChanged || dnsChanged
-  const shouldStartVpn = !curVpnStatus.running
+  const shouldStartVpn = !curVpnStatus.running || pendingTunRebindInstanceId === instanceId
 
   if (shouldStartVpn || configChanged) {
     console.info('vpn service virtual ip changed', JSON.stringify(curVpnStatus), virtual_ip)
@@ -607,8 +609,14 @@ function enqueueVpnReconcile(instanceId: string, generation: number) {
   return enqueueVpnTask(() => reconcileNetworkInstance(instanceId, generation))
 }
 
-export async function onNetworkInstanceChange(instanceId: string) {
+export async function onNetworkInstanceChange(instanceId: string, coreRestarted = false) {
   if (suspended) return
+  if (coreRestarted && instanceId === activeVpnInstanceId) {
+    // Preserve the rebind request if a concurrent status sync supersedes this
+    // event's generation. An identical config does not mean the core kept its TUN.
+    pendingTunRebindInstanceId = instanceId
+    diagnostic('core_replaced_rebind_tun')
+  }
   const generation = beginVpnReconcile(instanceId || undefined)
 
   if (instanceId && await isNoTunEnabled(instanceId)) {
@@ -674,6 +682,13 @@ export async function initMobileVpnService() {
 export async function prepareVpnService(instanceId: string) {
   if (suspended) return
   if (await isNoTunEnabled(instanceId)) {
+    return
+  }
+
+  // An already-authorized owner needs no new permission check. A real core
+  // replacement is handled by its post-run event, which rebinds the TUN.
+  if (instanceId === desiredVpnInstanceId && curVpnStatus.running) {
+    diagnostic('pre_run_existing_vpn_owner')
     return
   }
 
@@ -771,7 +786,11 @@ export async function refreshMobileVpnStatus() {
   mobileVpnState.recovery = health.recoveries
   setMobileVpnPhase(status.healthy ? 'connected' : status.exhausted ? 'error' : 'checking',
     status.healthy ? '' : status.exhausted ? 'recovery_exhausted' : status.reason)
-  if (Date.now() - lastDiagnosticAt >= 15000) diagnostic(status.reason, native, info)
+  // Event logging must not postpone periodic snapshots during a startup loop.
+  if (Date.now() - lastHealthSnapshotAt >= 15000) {
+    lastHealthSnapshotAt = Date.now()
+    diagnostic(status.reason, native, info)
+  }
   if (!status.recover) return
 
   recovering = true

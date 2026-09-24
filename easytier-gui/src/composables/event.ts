@@ -68,7 +68,7 @@ async function onPostRunNetworkInstance(event: Event<unknown>) {
     const instanceId = normalizeInstanceIdPayload(event.payload)
     console.log(`Received event '${EVENTS.POST_RUN_NETWORK_INSTANCE}', raw payload:`, event.payload, 'normalized:', instanceId)
     if (type() === 'android') {
-        await onNetworkInstanceChange(instanceId);
+        await onNetworkInstanceChange(instanceId, true);
     }
 }
 

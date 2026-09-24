@@ -15,6 +15,17 @@
 
 ## 持续异常恢复和诊断日志
 
+### 首次启动反复失败的后续修复
+
+针对 `775beec0` 日志中同一实例反复进入启动前检查、本地 RPC 约 5 秒超时、随后旧实例被删除的问题：
+
+- Android 配置下发回调已经持有核心实例互斥锁，清理其他 TUN 实例改为直接等待本地清理完成，不再通过需要同一把锁的嵌套删除 RPC。排除本次目标实例，先检查用户配置所有权再清理其他网络。用户管理的 VPN、其他 no-TUN 实例及被保护的实例仍保留。
+- Android 配置服务器重复下发相同配置时保留原核心实例；配置确有变化时正常重建。该行为仅由 Android GUI 的配置服务器回调启用，其他调用方的显式覆盖重启保持原有语义。
+- 真正的核心重建事件会要求重新创建并接入 Android TUN，即使实例 ID、IP 和路由相同；并发状态同步不会吞掉这个重新接入请求。当前 VPN 所有者不重复进入授权检查。
+- 定时健康快照使用独立计时，频繁阶段日志不再推迟每 15 秒的快照。新增配置回调来源、其他被停止的实例、未变配置跳过重建和 TUN 重新接入日志。
+
+这修复了日志对应的启动流程缺陷；尚不能保证握手后收不到心跳的所有情况都由该缺陷引起，仍需真机对照新日志验证。
+
 - 持续 45 秒无法确认心跳或路由时，关闭 Android VPN，等待旧核心实例清理完成，再重建实例及 VPN。恢复直接调用本地实例管理器，避开短时 RPC 请求超时后旧清理仍在执行的问题；使用管理 RPC 共用的互斥锁防止重叠。保留实例配置来源、文件权限、其他 no-TUN 实例和配置服务器会话。
 - 每轮最多自动恢复 3 次，恢复开始间隔至少为 45、90 秒（第三次后的冷却为 180 秒）；两分钟持续健康或手动连接才重置预算。收包停滞检测允许 75 秒空闲，以容纳核心最长 32 秒的心跳间隔。无网络和前端长时间暂停不计入连续故障时间。
 - 最后一次恢复后仍等待 45 秒再显示次数耗尽；耗尽后继续观察自然恢复，但不再自动重建。清理或重建调用失败会保持错误，等待手动重试。
@@ -46,11 +57,12 @@
 
 已通过：
 
-- 42 项 Vitest 连接/授权/重试/停止/切网/配置迁移及健康恢复模拟测试，包含恢复次数上限、清理期间停止、状态查询失败、恢复失败后手动重试、空闲心跳和收包停滞。
+- 45 项 Vitest 连接/授权/重试/停止/切网/配置迁移及健康恢复模拟测试，另覆盖相同实例重建后的 TUN 接入、与状态同步的竞争、频繁事件下定时快照仍能输出。
 - 2 项真实 Vue + PrimeVue 控件测试：配置新增、长名称编辑、URL 编辑、下拉切换、删除、保存后重新加载；恢复期间停止、错误后重试以及 HTTP 未验证提示。
 - GUI 正式生产构建（包含共享前端库和 TypeScript 检查）。
 - `cargo +1.95.0 check -p easytier-gui --lib --locked`，Windows 目标；仅此检查通过环境变量跳过 Windows 打包资源，没有改动资源配置。
 - Rust 连接意图失效测试。
+- 核心实例管理器回归测试：独立解析的并发重复配置保留原实例，变更配置正常替换，启动回调拒绝时保留旧实例，显式重启保持原语义，持锁清理其他实例能够完成。已加入 aarch64 CI 的构建前检查。
 - Kotlin 2.1.20 编译检查：真实 Android API 34 和 AndroidX，Tauri 注解及 JSObject 使用锁定版本源码；Plugin/Invoke/生成 Activity 使用核对过的编译签名替身。此项不是完整 Gradle/Android 运行验证。
 
 可复跑的项目命令：
@@ -62,6 +74,7 @@ pnpm --filter easytier-gui test:mobile-vpn
 pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts tests/gui-mobile-status.spec.ts
 rustc --edition 2024 --test easytier-gui/src-tauri/src/connection_intent.rs -o connection-intent-tests
 ./connection-intent-tests
+cargo test -p easytier-core --lib mobile_config_pushes_preserve_instances_and_do_not_reenter_the_mutation_lock --locked
 ```
 
 未执行完整 Android APK 编译、真机 VPN、HyperOS 后台保活、锁屏长时间运行、真实 Wi-Fi/蜂窝切换和远端 HTTP 访问；因此不能据本地测试保证小米 15 上所有断连都已解决。
