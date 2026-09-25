@@ -107,6 +107,7 @@ export function logMobileVpnDiagnostic(snapshot: {
   session: string, generation: number, instanceId?: string, phase: string,
   reason: string, peers: number, routes: number, recovery: number,
   networkId?: string | null, nativeRunning?: boolean, fd?: number,
+  corePeerId?: number, attachedPeerId?: number, tunRebindPending?: boolean,
   peerDetails?: { peerId: number, connId: string, latencyUs: number, lossRate: number, rxPackets: string, txPackets: string }[],
   routeDetails?: { peerId: number, nextHop: number, cost: number, version: string }[],
 }) {

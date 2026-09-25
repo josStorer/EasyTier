@@ -29,6 +29,7 @@ const VPN_RECONCILE_MAX_ATTEMPTS = 60
 
 let desiredVpnInstanceId: string | undefined
 let activeVpnInstanceId: string | undefined
+let attachedPeerId: number | undefined
 let pendingTunRebindInstanceId: string | undefined
 let vpnReconcileGeneration = 0
 let vpnReconcileAttempts = 0
@@ -75,6 +76,8 @@ function diagnostic(reason: string, native?: { running?: boolean, fd?: number },
     peers: mobileVpnState.peers, routes: mobileVpnState.routes,
     recovery: mobileVpnState.recovery, networkId,
     nativeRunning: native?.running, fd: native?.fd,
+    corePeerId: info?.my_node_info?.peer_id, attachedPeerId,
+    tunRebindPending: pendingTunRebindInstanceId !== undefined,
     peerDetails: info?.peers?.slice(0, 8).flatMap(peer => (peer.conns ?? []).slice(0, 2).map(conn => ({
       peerId: peer.peer_id, connId: conn.conn_id, latencyUs: Number(conn.stats?.latency_us ?? 0),
       lossRate: Number(conn.loss_rate ?? 0), rxPackets: String(conn.stats?.rx_packets ?? 0),
@@ -241,6 +244,7 @@ function scheduleVpnReconcile(instanceId: string, generation: number, reason: st
 }
 
 function resetVpnConfigStatus() {
+  attachedPeerId = undefined
   curVpnStatus.ipv4Addr = undefined
   curVpnStatus.ipv4Cidr = undefined
   curVpnStatus.routes = []
@@ -294,6 +298,7 @@ async function doStopVpn(force = false) {
     return
   }
   console.log('stop vpn')
+  diagnostic('native_vpn_stop_requested')
   const stop_ret = await stop_vpn()
   console.log('stop vpn', JSON.stringify((stop_ret)))
   await waitVpnStatus(false, 3)
@@ -303,7 +308,7 @@ async function doStopVpn(force = false) {
   resetVpnConfigStatus()
 }
 
-async function doStartVpn(instanceId: string, generation: number, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+async function doStartVpn(instanceId: string, generation: number, peerId: number, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
   if (curVpnStatus.running) {
     return
   }
@@ -355,12 +360,13 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
       if (typeof native.fd !== 'number' || native.fd < 0) throw new Error('vpn_fd_unavailable')
       // Do not publish success until the matching instance accepted this TUN.
       await setTunFd(native.fd, instanceId)
-      diagnostic('tun_attached', native)
       if (!isCurrentVpnReconcile(instanceId, generation)) {
         await doStopVpn(true)
         return
       }
       curVpnStatus.running = true
+      attachedPeerId = peerId
+      diagnostic('tun_attached', native)
       break
     }
     if (Date.now() >= deadline) throw new Error('vpn_start_timeout')
@@ -524,6 +530,11 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
   }
 
   const virtualIpv4 = curNetworkInfo.my_node_info?.virtual_ipv4
+  const peerId = curNetworkInfo.my_node_info?.peer_id
+  if (peerId === undefined) {
+    scheduleVpnReconcile(instanceId, generation, 'network_info_unavailable')
+    return
+  }
   const virtual_ip = virtualIpv4?.address?.addr ? Utils.ipv4ToString(virtualIpv4.address) : undefined
 
   if (!virtual_ip || !virtual_ip.length) {
@@ -551,23 +562,20 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
   const dnsChanged = dns != curVpnStatus.dns
   const configChanged = ipChanged || cidrChanged || routesChanged || dnsChanged
   const shouldStartVpn = !curVpnStatus.running || pendingTunRebindInstanceId === instanceId
+    || attachedPeerId !== peerId
 
   if (shouldStartVpn || configChanged) {
     console.info('vpn service virtual ip changed', JSON.stringify(curVpnStatus), virtual_ip)
-    if (curVpnStatus.running) {
-      try {
-        await doStopVpn()
-      }
-      catch (e) {
-        console.error(e)
-      }
-    }
-
+    let stage = 'stop'
     try {
+      setMobileVpnPhase('starting')
+      diagnostic('tun_reconcile_started', undefined, curNetworkInfo)
+      if (curVpnStatus.running) await doStopVpn()
       if (!isCurrentVpnReconcile(instanceId, generation))
         return
 
-      await doStartVpn(instanceId, generation, virtual_ip, network_length, routes, dns)
+      stage = 'start_attach'
+      await doStartVpn(instanceId, generation, peerId, virtual_ip, network_length, routes, dns)
       if (!isCurrentVpnReconcile(instanceId, generation) && activeVpnInstanceId === instanceId) {
         await doStopVpn()
       }
@@ -587,7 +595,13 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
       if (!isCurrentVpnReconcile(instanceId, generation)) return
       const message = e instanceof Error ? e.message : String(e)
       setMobileVpnPhase('error', message)
-      await doStopVpn(true)
+      diagnostic(`tun_reconcile_failed_${stage}`, undefined, curNetworkInfo)
+      try {
+        await doStopVpn(true)
+      }
+      catch {
+        diagnostic('native_vpn_cleanup_failed')
+      }
       scheduleVpnReconcile(instanceId, generation, message)
     }
   }
@@ -606,7 +620,17 @@ function enqueueVpnTask(task: () => Promise<void>) {
 }
 
 function enqueueVpnReconcile(instanceId: string, generation: number) {
-  return enqueueVpnTask(() => reconcileNetworkInstance(instanceId, generation))
+  return enqueueVpnTask(async () => {
+    try {
+      await reconcileNetworkInstance(instanceId, generation)
+    }
+    catch {
+      if (!isCurrentVpnReconcile(instanceId, generation)) return
+      diagnostic('tun_reconcile_query_failed')
+      setMobileVpnPhase('error', 'network_info_query_failed')
+      scheduleVpnReconcile(instanceId, generation, 'network_info_query_failed')
+    }
+  })
 }
 
 export async function onNetworkInstanceChange(instanceId: string, coreRestarted = false) {
@@ -615,11 +639,23 @@ export async function onNetworkInstanceChange(instanceId: string, coreRestarted 
     // Preserve the rebind request if a concurrent status sync supersedes this
     // event's generation. An identical config does not mean the core kept its TUN.
     pendingTunRebindInstanceId = instanceId
+    setMobileVpnPhase('starting')
     diagnostic('core_replaced_rebind_tun')
   }
   const generation = beginVpnReconcile(instanceId || undefined)
 
-  if (instanceId && await isNoTunEnabled(instanceId)) {
+  let noTun: boolean
+  try {
+    noTun = await isNoTunEnabled(instanceId)
+  }
+  catch {
+    if (!isCurrentVpnReconcile(instanceId, generation)) return
+    diagnostic('tun_reconcile_config_failed')
+    setMobileVpnPhase('error', 'network_info_query_failed')
+    scheduleVpnReconcile(instanceId, generation, 'network_info_query_failed')
+    return
+  }
+  if (instanceId && noTun) {
     if (vpnReconcileGeneration !== generation)
       return
 
@@ -780,6 +816,16 @@ export async function refreshMobileVpnStatus() {
     diagnostic('network_info_failed', native)
   }
   if (!isCurrentVpnReconcile(instanceId, generation)) return
+  // Native VPN liveness and peer heartbeats do not prove that this generation
+  // of the core owns the TUN. Repair missed/failed post-run events before health.
+  if (pendingTunRebindInstanceId === instanceId
+    || (info?.my_node_info && attachedPeerId !== info.my_node_info.peer_id)) {
+    pendingTunRebindInstanceId = instanceId
+    setMobileVpnPhase('starting')
+    diagnostic('tun_binding_mismatch', native, info)
+    await enqueueVpnReconcile(instanceId, generation)
+    return
+  }
   const status = sampleMobileHealth(health, info, Date.now())
   mobileVpnState.peers = status.peers
   mobileVpnState.routes = status.routes

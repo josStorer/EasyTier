@@ -835,6 +835,9 @@ struct MobileVpnDiagnostic {
     network_id: Option<String>,
     native_running: Option<bool>,
     fd: Option<i32>,
+    core_peer_id: Option<u32>,
+    attached_peer_id: Option<u32>,
+    tun_rebind_pending: Option<bool>,
     peer_details: Option<Vec<MobilePeerDiagnostic>>,
     route_details: Option<Vec<MobileRouteDiagnostic>>,
 }
@@ -869,6 +872,8 @@ fn log_mobile_vpn_diagnostic(snapshot: MobileVpnDiagnostic) {
         peers = snapshot.peers, routes = snapshot.routes, recovery = snapshot.recovery,
         network_id = ?snapshot.network_id, native_running = ?snapshot.native_running,
         fd = ?snapshot.fd, peer_details = ?snapshot.peer_details,
+        core_peer_id = ?snapshot.core_peer_id, attached_peer_id = ?snapshot.attached_peer_id,
+        tun_rebind_pending = ?snapshot.tun_rebind_pending,
         route_details = ?snapshot.route_details, "VPN diagnostic");
 }
 

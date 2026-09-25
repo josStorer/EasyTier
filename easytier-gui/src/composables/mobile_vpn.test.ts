@@ -72,15 +72,18 @@ function setConfig(instanceId: string, noTun = false) {
   })
 }
 
-function setReady(instanceId: string, ipv4: string) {
+function setReady(instanceId: string, ipv4: string, peerId = 1, healthy = false) {
   mocks.networkInfo.set(instanceId, {
     my_node_info: {
+      peer_id: peerId,
       virtual_ipv4: {
         address: { addr: ipv4 },
         network_length: 24,
       },
     },
-    routes: [],
+    peers: healthy ? [{ peer_id: 2, conns: [{ conn_id: 'conn', loss_rate: 0,
+      stats: { latency_us: 22000, rx_packets: 2 } }] }] : [],
+    routes: healthy ? [{ peer_id: 3, next_hop_peer_id: 2, cost: 2 }] : [],
   })
 }
 
@@ -125,6 +128,71 @@ beforeEach(() => {
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
 
 describe('mobile VPN reconciliation ownership', () => {
+  it('repairs a missed core restart event before reporting healthy heartbeats', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1', 100, true)
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('connected')
+    setReady('A', '10.0.0.1', 101, true)
+    await vpn.refreshMobileVpnStatus()
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+    expect(vpn.mobileVpnState.phase).toBe('connecting')
+    expect(mocks.logMobileVpnDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'tun_binding_mismatch', corePeerId: 101, attachedPeerId: 100,
+    }))
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('connected')
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries a failed post-run config query instead of trusting the old live VPN', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1', 100, true)
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.getConfig.mockRejectedValueOnce(new Error('temporary config failure'))
+    await vpn.onNetworkInstanceChange('A', true)
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('error')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('connected')
+  })
+
+  it('does not swallow stop failures and report healthy on a stale TUN', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1', 100, true)
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.stopVpn.mockRejectedValueOnce(new Error('stop failed'))
+    mocks.stopVpn.mockRejectedValueOnce(new Error('cleanup failed'))
+    await vpn.onNetworkInstanceChange('A', true)
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('error')
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(2)
+    await vpn.refreshMobileVpnStatus()
+    expect(vpn.mobileVpnState.phase).toBe('connected')
+  })
+
+  it('cancels a failed rebind retry on manual stop', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1', 100, true)
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.getConfig.mockRejectedValueOnce(new Error('temporary config failure'))
+    await vpn.onNetworkInstanceChange('A', true)
+    await vpn.suspendMobileVpn()
+    await vi.advanceTimersByTimeAsync(10000)
+    await vpn.refreshMobileVpnStatus()
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(1)
+    expect(vpn.mobileVpnState.phase).toBe('stopped')
+  })
+
   it('does not recheck permission for the running owner, but rebinds TUN when its core is replaced', async () => {
     setConfig('A')
     setReady('A', '10.0.0.1')

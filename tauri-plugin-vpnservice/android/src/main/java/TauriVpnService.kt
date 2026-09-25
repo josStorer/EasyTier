@@ -101,13 +101,20 @@ class TauriVpnService : VpnService() {
         super.onRevoke()
     }
 
+    fun stopVpn() {
+        // stopService alone can leave a system-bound service alive. Release the
+        // actual TUN before acknowledging Stop, rather than waiting for onDestroy.
+        disconnect()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        EasyTierVpnTileService.requestStateUpdate(this)
+    }
+
     private fun disconnect() {
-        if (vpnInterface != null) {
-            triggerCallback("vpn_service_stop", JSObject())
-            vpnInterface?.close()
-            vpnInterface = null
-        }
+        val previous = vpnInterface
+        previous?.close()
+        vpnInterface = null
         clearStatus()
+        if (previous != null) triggerCallback("vpn_service_stop", JSObject())
     }
 
     private fun clearStatus() {

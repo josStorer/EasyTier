@@ -162,10 +162,15 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             println("stop vpn in plugin")
             TauriVpnService.pendingRequestId = null
-            activity.stopService(Intent(activity, TauriVpnService::class.java))
-            activity.stopService(Intent().setClassName(activity.packageName, "${activity.packageName}.MainForegroundService"))
-            println("stop vpn in plugin end")
-            invoke.resolve(JSObject())
+            try {
+                TauriVpnService.self?.stopVpn()
+                activity.stopService(Intent(activity, TauriVpnService::class.java))
+                activity.stopService(Intent().setClassName(activity.packageName, "${activity.packageName}.MainForegroundService"))
+                println("stop vpn in plugin end")
+                invoke.resolve(JSObject())
+            } catch (error: Exception) {
+                invoke.reject(error.message ?: error.javaClass.simpleName)
+            }
         }
     }
 
