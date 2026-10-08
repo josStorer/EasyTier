@@ -4,6 +4,7 @@ import { createI18n } from 'vue-i18n'
 import PrimeVue from 'primevue/config'
 import source from '../../../tauri-plugin-vpnservice/android/src/main/assets/bookmark_dom.js?raw'
 import Bookmarks from '../../../easytier-gui/src/components/Bookmarks.vue'
+import { preventAppContextMenu } from '../../../easytier-gui/src/modules/context_menu'
 import { validateBookmark, type BookmarkEdit, type BookmarkSnapshot } from '../../../easytier-gui/src/composables/bookmarks'
 const native = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<BookmarkSnapshot>>())
 vi.mock('../../../easytier-gui/src/composables/bookmarks', async importOriginal => ({
@@ -34,6 +35,37 @@ beforeEach(() => {
 })
 
 describe('favorite addresses UI', () => {
+  it('allows native edit menus on every bookmark field under the production context-menu policy', async () => {
+    document.addEventListener('contextmenu', preventAppContextMenu)
+    const wrapper = mount(Bookmarks, { attachTo: document.body,
+      global: { plugins: [PrimeVue, createI18n({ legacy: false, locale: 'en', messages: { en: {} } })] } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('button').find(button => button.text() === 'New')!.trigger('click')
+      await flushPromises()
+      const fields = document.querySelectorAll<HTMLInputElement>('[role=dialog] input')
+      expect(fields.length).toBeGreaterThanOrEqual(4)
+      for (const field of fields) {
+        for (const value of ['', 'selected text']) {
+          field.value = value
+          const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+          field.dispatchEvent(event)
+          expect(event.defaultPrevented, field.getAttribute('aria-label') || field.type).toBe(false)
+        }
+      }
+      const textarea = document.createElement('textarea')
+      textarea.readOnly = true; textarea.value = 'copyable text'; document.body.append(textarea)
+      const copy = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+      textarea.dispatchEvent(copy); expect(copy.defaultPrevented).toBe(false)
+      textarea.remove()
+      const background = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+      document.body.dispatchEvent(background); expect(background.defaultPrevented).toBe(true)
+    } finally {
+      wrapper.unmount()
+      document.removeEventListener('contextmenu', preventAppContextMenu)
+    }
+  })
+
   it('switches between saved pages and keeps each page open state separate', async () => {
     saved = { selectedId: 'A', items: [
       { id: 'A', name: 'LAN A', url: 'http://10.0.0.1', selector: '', hasSecret: false, autoEnter: false, opened: true },

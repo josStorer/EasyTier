@@ -9,6 +9,7 @@ import App from '~/App.vue';
 import 'easytier-frontend-lib/style.css';
 import { ConfirmationService, DialogService, ToastService } from 'primevue';
 import '~/styles.css';
+import { preventAppContextMenu } from './modules/context_menu';
 
 
 if (import.meta.env.PROD) {
@@ -22,9 +23,7 @@ if (import.meta.env.PROD) {
     }
   })
 
-  document.addEventListener('contextmenu', (event) => {
-    event.preventDefault()
-  })
+  document.addEventListener('contextmenu', preventAppContextMenu)
 }
 
 async function main() {
