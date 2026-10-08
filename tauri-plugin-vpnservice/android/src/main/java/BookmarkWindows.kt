@@ -90,6 +90,7 @@ class BookmarkAutofill(
     private val handler = Handler(Looper.getMainLooper())
     private val deadline = SystemClock.elapsedRealtime() + 8000
     private var finished = false
+    private var lastProbe = "waiting"
     private val script = activity.assets.open("bookmark_dom.js").bufferedReader().use { it.readText() }
     private val origin = origin(item.getString("url"))
     private val probe = JSONObject().put("origin", origin).put("selector", item.optString("selector"))
@@ -107,7 +108,7 @@ class BookmarkAutofill(
     private fun finish(reason: String) {
         if (finished) return
         stop()
-        report(reason)
+        report(if (reason == "timeout" && lastProbe == "input_unavailable") lastProbe else reason)
     }
 
     private fun evaluate(config: JSONObject, callback: (String) -> Unit) {
@@ -120,6 +121,7 @@ class BookmarkAutofill(
         if (finished) return
         if (SystemClock.elapsedRealtime() >= deadline) { finish("timeout"); return }
         evaluate(probe) { state ->
+            lastProbe = state
             when (state) {
                 "ready" -> {
                     if (SystemClock.elapsedRealtime() >= deadline) { finish("timeout"); return@evaluate }
@@ -132,7 +134,16 @@ class BookmarkAutofill(
                         val remaining = deadline - SystemClock.elapsedRealtime()
                         if (remaining <= 0) { finish("timeout"); return@evaluate }
                         fill.put("expiresAt", System.currentTimeMillis() + remaining)
-                        evaluate(fill) { finish(if (it == "filled") "filled" else "fill_failed") }
+                        evaluate(fill) {
+                            when (it) {
+                                "waiting", "input_unavailable" -> {
+                                    lastProbe = it
+                                    handler.postDelayed({ poll() }, 100)
+                                }
+                                "filled", "invalid_selector", "invalid_input", "timeout" -> finish(it)
+                                else -> finish("fill_failed")
+                            }
+                        }
                     } catch (_: Exception) { finish("key_error") }
                 }
                 "invalid_selector", "invalid_input" -> finish(state)

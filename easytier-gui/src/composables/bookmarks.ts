@@ -20,6 +20,7 @@ export const saveBookmark = (item: BookmarkEdit) => invoke<BookmarkSnapshot>('pl
 export const selectBookmark = (id: string) => invoke<BookmarkSnapshot>('plugin:vpnservice|select_bookmark', { id })
 export const deleteBookmark = (id: string) => invoke<BookmarkSnapshot>('plugin:vpnservice|delete_bookmark', { id })
 export const openBookmark = (id: string) => invoke<void>('open_bookmark', { id })
+export const readBookmarkClipboard = () => invoke<string>('plugin:clipboard-manager|read_text')
 
 export function validateBookmark(item: BookmarkEdit, hasSecret: boolean, document: Document) {
   if (!item.name.trim() || item.name.length > 120) return 'nameError'

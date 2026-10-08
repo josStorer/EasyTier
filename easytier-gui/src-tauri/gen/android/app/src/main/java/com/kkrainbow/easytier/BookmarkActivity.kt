@@ -73,6 +73,7 @@ class BookmarkActivity : TauriActivity() {
                 "timeout" -> "8 秒内未完成自动填入，请手动操作 · 点击收起"
                 "invalid_selector" -> "DOM query 无效，请修改收藏配置"
                 "invalid_input" -> "匹配元素不是可编辑输入框"
+                "input_unavailable" -> "8 秒内第一个匹配输入框仍不可编辑，请检查 DOM query"
                 "key_error" -> "无法读取或计算验证码，请检查 2FA 密钥"
                 else -> "未填入：页面已跳转或输入框发生变化"
             } else when (state) {
@@ -81,6 +82,7 @@ class BookmarkActivity : TauriActivity() {
                 "timeout" -> "Autofill timed out after 8 seconds · Tap to dismiss"
                 "invalid_selector" -> "Invalid DOM query; edit this bookmark"
                 "invalid_input" -> "Matched element is not an editable input"
+                "input_unavailable" -> "The first matching input stayed unavailable for 8 seconds; check DOM query"
                 "key_error" -> "Could not read or calculate OTP; check the key"
                 else -> "Not filled: page or input changed"
             }

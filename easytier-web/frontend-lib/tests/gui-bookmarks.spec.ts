@@ -1,5 +1,5 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createI18n } from 'vue-i18n'
 import PrimeVue from 'primevue/config'
 import source from '../../../tauri-plugin-vpnservice/android/src/main/assets/bookmark_dom.js?raw'
@@ -11,6 +11,7 @@ import Bookmarks from '../../../easytier-gui/src/components/Bookmarks.vue'
 import { preventAppContextMenu } from '../../../easytier-gui/src/modules/context_menu'
 import { validateBookmark, type BookmarkEdit, type BookmarkSnapshot } from '../../../easytier-gui/src/composables/bookmarks'
 const native = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<BookmarkSnapshot>>())
+const clipboard = vi.hoisted(() => vi.fn<() => Promise<string>>())
 vi.mock('../../../easytier-gui/src/composables/bookmarks', async importOriginal => ({
   ...await importOriginal<typeof import('../../../easytier-gui/src/composables/bookmarks')>(),
   listBookmarks: () => native('plugin:vpnservice|list_bookmarks'),
@@ -18,11 +19,13 @@ vi.mock('../../../easytier-gui/src/composables/bookmarks', async importOriginal 
   selectBookmark: (id: string) => native('plugin:vpnservice|select_bookmark', { id }),
   deleteBookmark: (id: string) => native('plugin:vpnservice|delete_bookmark', { id }),
   openBookmark: (id: string) => native('open_bookmark', { id }),
+  readBookmarkClipboard: clipboard,
 }))
 let saved: BookmarkSnapshot
 beforeEach(() => {
   document.body.innerHTML = ''
   saved = { items: [], selectedId: '' }
+  clipboard.mockReset().mockResolvedValue('')
   native.mockReset().mockImplementation(async (command, args) => {
     const payload = args as Record<string, unknown> | undefined
     if (command.endsWith('save_bookmark')) {
@@ -39,6 +42,42 @@ beforeEach(() => {
 })
 
 describe('favorite addresses UI', () => {
+  it('pastes into all editor fields, replaces selections, and preserves text on clipboard failure', async () => {
+    const wrapper = mount(Bookmarks, { attachTo: document.body,
+      global: { plugins: [PrimeVue, createI18n({ legacy: false, locale: 'en', messages: { en: {} } })] } })
+    const paste = async (label: string) => {
+      const button = document.querySelector<HTMLButtonElement>(`button[aria-label="Paste · ${label}"]`)!
+      button.click(); await flushPromises()
+    }
+    try {
+      await flushPromises()
+      await wrapper.findAll('button').find(button => button.text() === 'New')!.trigger('click'); await flushPromises()
+      expect(clipboard).not.toHaveBeenCalled()
+      for (const [label, value] of [['Name', 'Example'], ['URL', 'http://192.0.2.1'],
+        ['DOM query (optional)', 'input[id]'], ['2FA secret key (optional)', 'JBSWY3DPEHPK3PXP']]) {
+        clipboard.mockResolvedValueOnce(value)
+        await paste(label)
+        expect(document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!.value).toBe(value)
+      }
+      const name = document.querySelector<HTMLInputElement>('input[aria-label="Name"]')!
+      name.focus(); name.setSelectionRange(0, 7)
+      clipboard.mockResolvedValueOnce('Replaced')
+      await paste('Name'); expect(name.value).toBe('Replaced')
+      expect(document.activeElement).toBe(name); expect(name.selectionStart).toBe(8)
+      clipboard.mockRejectedValueOnce('Clipboard is empty')
+      await paste('Name'); expect(name.value).toBe('Replaced')
+      expect(document.querySelector('[role=dialog]')!.textContent).toContain('No text is available')
+      clipboard.mockRejectedValueOnce(new Error('clipboard access denied'))
+      await paste('Name'); expect(name.value).toBe('Replaced')
+      expect(document.querySelector('[role=dialog]')!.textContent).toContain('Could not read the system clipboard')
+      clipboard.mockResolvedValueOnce('x'.repeat(121))
+      await paste('Name'); expect(name.value).toBe('Replaced')
+      expect(document.querySelector('[role=dialog]')!.textContent).toContain('length limit')
+      const secret = document.querySelector<HTMLInputElement>('input[type=password]')!
+      expect(secret.value).toBe('JBSWY3DPEHPK3PXP')
+    } finally { wrapper.unmount() }
+  })
+
   it('uses package-relative Android activity names required by Tao', () => {
     // Tao prefixes the package when loading activity_name and compares the
     // parent against getLocalClassName(). Fully qualified names compile but fail.
@@ -183,6 +222,13 @@ describe('favorite addresses UI', () => {
 })
 
 describe('actual WebView autofill script', () => {
+  beforeEach(() => {
+    // Happy DOM does not lay out elements. Supply geometry explicitly; selection,
+    // disabled/readonly attributes, visibility styles and events use the real DOM.
+    const rect = new DOMRect(0, 0, 100, 24)
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue(Object.assign([rect], { item: () => rect }))
+  })
+  afterEach(() => { vi.restoreAllMocks() })
   const run = (config: Record<string, unknown>) => window.eval(source.replace('__BOOKMARK_CONFIG__', JSON.stringify({ origin: location.origin, selector: '#otp', ...config })))
   it('waits for dynamic input, fires input/change events, and fills leading zeroes', () => {
     expect(run({})).toBe('waiting')
@@ -201,7 +247,67 @@ describe('actual WebView autofill script', () => {
     expect(run({ code: '123456', origin: 'https://another.example' })).toBe('wrong_origin')
     expect(run({ selector: '[' })).toBe('invalid_selector')
     document.body.innerHTML = '<input id="otp" disabled>'
+    expect(run({})).toBe('input_unavailable')
+    document.body.innerHTML = '<div id="otp"></div>'
     expect(run({})).toBe('invalid_input')
+  })
+  it('waits for the first match instead of skipping to a later usable input', () => {
+    document.body.innerHTML = '<input id="first" disabled><input id="otp" type="tel">'
+    const first = document.querySelector<HTMLInputElement>('#first')!
+    expect(run({ selector: 'input[id]', code: '005924' })).toBe('input_unavailable')
+    expect(document.querySelector<HTMLInputElement>('#otp')!.value).toBe('')
+    first.disabled = false
+    expect(run({ selector: 'input[id]' })).toBe('ready')
+    expect(run({ selector: 'input[id]', code: '005924' })).toBe('filled')
+    expect(first.value).toBe('005924')
+    expect(document.querySelector<HTMLInputElement>('#otp')!.value).toBe('')
+  })
+  it('does not skip a hidden first match and never fills after the deadline', () => {
+    document.body.innerHTML = '<input id="first" type="hidden"><input id="otp">'
+    expect(run({ selector: 'input[id]', code: '123456' })).toBe('input_unavailable')
+    const first = document.querySelector<HTMLInputElement>('#first')!
+    first.type = 'text'
+    expect(run({ selector: 'input[id]', code: '123456', expiresAt: Date.now() - 1 })).toBe('timeout')
+    for (const input of document.querySelectorAll('input')) expect(input.value).toBe('')
+  })
+  it('waits for an input to become editable and visible', () => {
+    document.body.innerHTML = '<input id="otp" readonly>'
+    const input = document.querySelector<HTMLInputElement>('#otp')!
+    expect(run({ code: '123456' })).toBe('input_unavailable')
+    expect(input.value).toBe('')
+    input.readOnly = false; input.style.visibility = 'hidden'
+    expect(run({})).toBe('input_unavailable')
+    input.style.visibility = 'visible'
+    const geometry = vi.spyOn(input, 'getClientRects').mockReturnValue(Object.assign([], { item: () => null }))
+    expect(run({})).toBe('input_unavailable')
+    geometry.mockRestore()
+    expect(run({})).toBe('ready')
+    expect(run({ code: '123456' })).toBe('filled')
+  })
+  it('waits for a password field to finish its initial page-version check', () => {
+    document.body.innerHTML = '<form><input id="otp" type="password" disabled></form>'
+    const input = document.querySelector<HTMLInputElement>('#otp')!
+    expect(run({ selector: 'input[id]' })).toBe('input_unavailable')
+    expect(input.value).toBe('')
+    input.disabled = false
+    expect(run({ selector: 'input[id]' })).toBe('ready')
+    expect(run({ selector: 'input[id]', code: '005924' })).toBe('filled')
+    expect(input.value).toBe('005924')
+  })
+  it('fills only the first match and rechecks availability when filling', () => {
+    document.body.innerHTML = '<input id="username"><input id="otp">'
+    expect(run({ selector: 'input[id]', code: '123456' })).toBe('filled')
+    expect(document.querySelector<HTMLInputElement>('#username')!.value).toBe('123456')
+    expect(document.querySelector<HTMLInputElement>('#otp')!.value).toBe('')
+    expect(run({ selector: 'input[id="otp"]' })).toBe('ready')
+    const input = document.querySelector<HTMLInputElement>('#otp')!
+    input.disabled = true
+    expect(run({ selector: 'input[id="otp"]', code: '123456' })).toBe('input_unavailable')
+    expect(input.value).toBe('')
+    input.disabled = false
+    expect(run({ selector: 'input[id="otp"]', code: '123456' })).toBe('filled')
+    expect(input.value).toBe('123456')
+    expect(document.querySelector<HTMLInputElement>('#username')!.value).toBe('123456')
   })
   it('optionally submits a form, respecting an Enter handler that prevents default', () => {
     document.body.innerHTML = '<form><input id="otp"></form>'

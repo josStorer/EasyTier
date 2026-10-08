@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Button, Dialog, InputText, Select, ToggleSwitch } from 'primevue'
-import { deleteBookmark, listBookmarks, openBookmark, saveBookmark, selectBookmark, validateBookmark,
+import { deleteBookmark, listBookmarks, openBookmark, readBookmarkClipboard, saveBookmark, selectBookmark, validateBookmark,
   type BookmarkEdit, type BookmarkSnapshot } from '../composables/bookmarks'
 
 const { locale } = useI18n()
@@ -11,7 +11,10 @@ const zh = {
   name: '名称', url: '网址', selector: 'DOM query（可选）', key: '2FA secret key（可选）',
   keyHint: '粘贴 Base32 密钥或 otpauth://totp/ 导入链接。留空保留已有密钥。',
   savedKey: '已保存密钥', clear: '删除已有密钥', enter: '填入后自动回车',
-  hint: '打开页面后最多检测 8 秒；找到输入框时计算并填入当前 6 位验证码。仅在配置网址的同一来源填入。',
+  hint: '打开页面后最多检测 8 秒；只取第一个匹配元素，等待可编辑后填入当前 6 位验证码，不跳到后续元素。仅在同一来源填入。',
+  paste: '粘贴', clipboardEmpty: '系统剪贴板没有可粘贴文本，请先复制后重试。',
+  clipboardFailed: '无法读取系统剪贴板，请确认已复制纯文本，并检查系统是否允许 EasyTier 读取剪贴板。',
+  clipboardTooLong: '粘贴后的内容超过此字段长度限制，原内容未改动。',
   stored: '密钥在本机加密保存；卸载后无法恢复。', save: '保存', cancel: '取消', remove: '删除',
   closeFirst: '此页面已开启，请先在页面返回菜单中退出，再编辑或删除。',
   deleteAsk: '确定删除这个收藏及其 2FA 密钥？', empty: '保存常用的局域网 HTTP 服务或其他网址。',
@@ -24,7 +27,10 @@ const en: typeof zh = {
   name: 'Name', url: 'URL', selector: 'DOM query (optional)', key: '2FA secret key (optional)',
   keyHint: 'Paste a Base32 key or otpauth://totp/ URI. Leave blank to keep the saved key.',
   savedKey: 'Key saved', clear: 'Remove saved key', enter: 'Press Enter after filling',
-  hint: 'Look for the input for up to 8 seconds after opening, then calculate and fill the current six-digit code. Same-origin pages only.',
+  hint: 'Wait up to 8 seconds for the first matching element to become editable, then fill the current six-digit code. Later matches are never used. Same-origin pages only.',
+  paste: 'Paste', clipboardEmpty: 'No text is available in the system clipboard. Copy some text and retry.',
+  clipboardFailed: 'Could not read the system clipboard. Copy plain text and check whether EasyTier is allowed to read it.',
+  clipboardTooLong: 'Pasted content would exceed this field’s length limit. Existing content was kept.',
   stored: 'Keys are encrypted on this device and cannot be recovered after uninstalling.',
   save: 'Save', cancel: 'Cancel', remove: 'Delete', closeFirst: 'Close this page from its Back menu before editing or deleting it.',
   deleteAsk: 'Delete this favorite and its 2FA key?', empty: 'Save LAN HTTP services or other websites.',
@@ -43,6 +49,43 @@ const deleting = ref(false)
 const editError = ref('')
 const editHasSecret = ref(false)
 const draft = ref<BookmarkEdit>({ id: '', name: '', url: '', selector: '', secret: '', autoEnter: false, clearSecret: false })
+const editFields = [
+  { key: 'name', label: 'name', type: 'text', inputmode: 'text', maxLength: 120 },
+  { key: 'url', label: 'url', type: 'text', inputmode: 'url', maxLength: 2048 },
+  { key: 'selector', label: 'selector', type: 'text', inputmode: 'text', maxLength: 1024 },
+  { key: 'secret', label: 'key', type: 'password', inputmode: 'text', maxLength: 2048 },
+] as const
+
+async function paste(field: typeof editFields[number]) {
+  if (busy.value) return
+  const input = document.getElementById(`bookmark-${field.key}`)
+  if (!(input instanceof HTMLInputElement)) return
+  const value = draft.value[field.key]
+  const focused = document.activeElement === input
+  const start = focused ? input.selectionStart ?? value.length : value.length
+  const end = focused ? input.selectionEnd ?? start : value.length
+  let cursor: number | undefined
+  busy.value = true; editError.value = ''
+  try {
+    const clipboard = await readBookmarkClipboard()
+    if (!visible.value || !input.isConnected) return
+    if (!clipboard) { editError.value = text.value.clipboardEmpty; return }
+    const updated = value.slice(0, start) + clipboard + value.slice(end)
+    if (updated.length > field.maxLength) { editError.value = text.value.clipboardTooLong; return }
+    draft.value[field.key] = updated
+    if (field.key === 'secret') draft.value.clearSecret = false
+    cursor = start + clipboard.length
+  }
+  catch (cause) {
+    const detail = typeof cause === 'string' ? cause : cause instanceof Error ? cause.message : ''
+    editError.value = detail.includes('Clipboard is empty') ? text.value.clipboardEmpty : text.value.clipboardFailed
+  }
+  finally { busy.value = false }
+  if (cursor !== undefined) {
+    await nextTick()
+    input.focus(); input.setSelectionRange(cursor, cursor)
+  }
+}
 
 async function refresh() {
   if (busy.value) return
@@ -114,13 +157,19 @@ onUnmounted(() => { window.removeEventListener('focus', onFocus); document.remov
     <Dialog v-model:visible="visible" modal :header="text.title" :closable="!busy" :close-on-escape="!busy"
       :style="{ width: '34rem', maxWidth: 'calc(100vw - 1rem)' }" @hide="draft.secret = ''">
       <form class="flex flex-col gap-3" @submit.prevent="save">
-        <label class="flex flex-col gap-1">{{ text.name }}<InputText v-model="draft.name" maxlength="120" :aria-label="text.name" /></label>
-        <label class="flex flex-col gap-1">{{ text.url }}<InputText v-model="draft.url" type="url" maxlength="2048" :aria-label="text.url" /></label>
-        <label class="flex flex-col gap-1">{{ text.selector }}<InputText v-model="draft.selector" maxlength="1024" placeholder="input[name=otp]" :aria-label="text.selector" /></label>
-        <label class="flex flex-col gap-1">{{ text.key }}<InputText v-model="draft.secret" type="password" autocomplete="new-password" maxlength="2048" :aria-label="text.key" /></label>
+        <div v-for="field in editFields" :key="field.key" class="flex flex-col gap-1">
+          <label :for="`bookmark-${field.key}`">{{ text[field.label] }}</label>
+          <div class="flex gap-2 min-w-0">
+            <InputText :id="`bookmark-${field.key}`" v-model="draft[field.key]" :type="field.type" :inputmode="field.inputmode"
+              :maxlength="field.maxLength" :autocomplete="field.key === 'secret' ? 'new-password' : 'off'"
+              :aria-label="text[field.label]" :disabled="busy" class="flex-1 min-w-0" />
+            <Button type="button" :label="text.paste" :aria-label="`${text.paste} · ${text[field.label]}`"
+              severity="secondary" outlined :disabled="busy" @pointerdown.prevent @click="paste(field)" />
+          </div>
+        </div>
         <p class="text-sm opacity-70">{{ text.keyHint }} {{ text.stored }}</p>
-        <label v-if="editHasSecret" class="flex items-center gap-2"><ToggleSwitch v-model="draft.clearSecret" :aria-label="text.clear" />{{ text.clear }} ({{ text.savedKey }})</label>
-        <label class="flex items-center gap-2"><ToggleSwitch v-model="draft.autoEnter" :aria-label="text.enter" />{{ text.enter }}</label>
+        <label v-if="editHasSecret" class="flex items-center gap-2"><ToggleSwitch v-model="draft.clearSecret" :aria-label="text.clear" :disabled="busy" />{{ text.clear }} ({{ text.savedKey }})</label>
+        <label class="flex items-center gap-2"><ToggleSwitch v-model="draft.autoEnter" :aria-label="text.enter" :disabled="busy" />{{ text.enter }}</label>
         <p class="text-sm opacity-70">{{ text.hint }}</p>
         <p v-if="editError" role="alert" class="text-red-500 break-words">{{ editError }}</p>
         <p v-if="deleting" class="text-sm">{{ text.deleteAsk }}</p>

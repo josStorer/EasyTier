@@ -7,8 +7,13 @@
   try { input = document.querySelector(config.selector); }
   catch { return 'invalid_selector'; }
   if (!input) return 'waiting';
-  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)
-      || input.disabled || input.readOnly) return 'invalid_input';
+  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) return 'invalid_input';
+  // Always wait for the first match; never skip it to fill a later input.
+  if (input instanceof HTMLInputElement
+      && !['text', 'password', 'tel', 'number', 'search', 'url', 'email'].includes(input.type)) return 'input_unavailable';
+  if (input.matches(':disabled') || input.readOnly || input.closest('[hidden], [inert]')) return 'input_unavailable';
+  const style = getComputedStyle(input);
+  if (!input.getClientRects().length || style.visibility === 'hidden' || style.visibility === 'collapse') return 'input_unavailable';
   if (!config.code) return 'ready';
   const prototype = input instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
