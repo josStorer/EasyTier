@@ -27,6 +27,7 @@ import { useToast, useConfirm } from 'primevue'
 import { loadMode, saveMode, WebClientConfig, type Mode } from '~/composables/mode'
 import { saveLastNetworkInstanceId, loadLastNetworkInstanceId } from '~/composables/config'
 import ModeSwitcher from '~/components/ModeSwitcher.vue'
+import Bookmarks from '~/components/Bookmarks.vue'
 import { getEasytierVersion, getServiceStatus, mobileConnectionEnabled } from '~/composables/backend'
 
 const { t, locale } = useI18n()
@@ -574,6 +575,7 @@ const configServerConnectionStatus = computed(() => {
 
     <Menu ref="log_menu" :model="log_menu_items_popup" :popup="true" />
 
+    <Bookmarks v-if="type() === 'android'" />
     <MobileConnectionStatus v-if="type() === 'android'" :profile="activeProfileName" />
 
     <RemoteManagement v-if="clientRunning" class="flex-1 overflow-y-auto" :api="remoteClient"

@@ -307,6 +307,18 @@
           "markdownDescription": "Denies the consume_vpn_tile_action command without any pre-configured scope."
         },
         {
+          "description": "Enables the delete_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-bookmark",
+          "markdownDescription": "Enables the delete_bookmark command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-bookmark",
+          "markdownDescription": "Denies the delete_bookmark command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_vpn_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-vpn-status",
@@ -317,6 +329,18 @@
           "type": "string",
           "const": "deny-get-vpn-status",
           "markdownDescription": "Denies the get_vpn_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-bookmarks",
+          "markdownDescription": "Enables the list_bookmarks command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-bookmarks",
+          "markdownDescription": "Denies the list_bookmarks command without any pre-configured scope."
         },
         {
           "description": "Enables the ping command without any pre-configured scope.",
@@ -365,6 +389,30 @@
           "type": "string",
           "const": "deny-register-listener",
           "markdownDescription": "Denies the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-bookmark",
+          "markdownDescription": "Enables the save_bookmark command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-bookmark",
+          "markdownDescription": "Denies the save_bookmark command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the select_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-select-bookmark",
+          "markdownDescription": "Enables the select_bookmark command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the select_bookmark command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-select-bookmark",
+          "markdownDescription": "Denies the select_bookmark command without any pre-configured scope."
         },
         {
           "description": "Enables the start_vpn command without any pre-configured scope.",

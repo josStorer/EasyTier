@@ -11,6 +11,12 @@
         android:theme="@style/Theme.easytier_gui"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
+            android:name=".BookmarkActivity"
+            android:exported="false"
+            android:documentLaunchMode="always"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"

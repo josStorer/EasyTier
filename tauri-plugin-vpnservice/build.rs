@@ -6,6 +6,10 @@ const COMMANDS: &[&str] = &[
     "get_vpn_status",
     "consume_vpn_tile_action",
     "registerListener",
+    "list_bookmarks",
+    "save_bookmark",
+    "select_bookmark",
+    "delete_bookmark",
 ];
 
 fn main() {

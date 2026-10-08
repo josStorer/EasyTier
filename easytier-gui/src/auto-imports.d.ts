@@ -23,6 +23,7 @@ declare global {
   const defineAsyncComponent: typeof import('vue')['defineAsyncComponent']
   const defineComponent: typeof import('vue')['defineComponent']
   const defineStore: typeof import('pinia')['defineStore']
+  const deleteBookmark: typeof import('./composables/bookmarks')['deleteBookmark']
   const deleteNetworkInstance: typeof import('./composables/backend')['deleteNetworkInstance']
   const effectScope: typeof import('vue')['effectScope']
   const executeVpnTileAction: typeof import('./composables/mobile_vpn_tile')['executeVpnTileAction']
@@ -48,6 +49,7 @@ declare global {
   const isReadonly: typeof import('vue')['isReadonly']
   const isRef: typeof import('vue')['isRef']
   const isWebClientConnected: typeof import('./composables/backend')['isWebClientConnected']
+  const listBookmarks: typeof import('./composables/bookmarks')['listBookmarks']
   const listNetworkInstanceIds: typeof import('./composables/backend')['listNetworkInstanceIds']
   const listenGlobalEvents: typeof import('./composables/event')['listenGlobalEvents']
   const loadLastNetworkInstanceId: typeof import('./composables/config')['loadLastNetworkInstanceId']
@@ -83,6 +85,7 @@ declare global {
   const onUnmounted: typeof import('vue')['onUnmounted']
   const onUpdated: typeof import('vue')['onUpdated']
   const onWatcherCleanup: typeof import('vue')['onWatcherCleanup']
+  const openBookmark: typeof import('./composables/bookmarks')['openBookmark']
   const parseNetworkConfig: typeof import('./composables/backend')['parseNetworkConfig']
   const prepareVpnService: typeof import('./composables/mobile_vpn')['prepareVpnService']
   const provide: typeof import('vue')['provide']
@@ -96,9 +99,11 @@ declare global {
   const resumeMobileVpn: typeof import('./composables/mobile_vpn')['resumeMobileVpn']
   const runNetworkInstance: typeof import('./composables/backend')['runNetworkInstance']
   const sampleMobileHealth: typeof import('./composables/mobile_health')['sampleMobileHealth']
+  const saveBookmark: typeof import('./composables/bookmarks')['saveBookmark']
   const saveLastNetworkInstanceId: typeof import('./composables/config')['saveLastNetworkInstanceId']
   const saveMode: typeof import('./composables/mode')['saveMode']
   const saveNetworkConfig: typeof import('./composables/backend')['saveNetworkConfig']
+  const selectBookmark: typeof import('./composables/bookmarks')['selectBookmark']
   const sendConfigs: typeof import('./composables/backend')['sendConfigs']
   const setActivePinia: typeof import('pinia')['setActivePinia']
   const setLoggingLevel: typeof import('./composables/backend')['setLoggingLevel']
@@ -138,6 +143,7 @@ declare global {
   const useSlots: typeof import('vue')['useSlots']
   const useTemplateRef: typeof import('vue')['useTemplateRef']
   const useTray: typeof import('./composables/tray')['useTray']
+  const validateBookmark: typeof import('./composables/bookmarks')['validateBookmark']
   const validateConfig: typeof import('./composables/backend')['validateConfig']
   const validateConfigServerProfiles: typeof import('./composables/config_server_profiles')['validateConfigServerProfiles']
   const watch: typeof import('vue')['watch']
@@ -174,6 +180,7 @@ declare module 'vue' {
     readonly defineAsyncComponent: UnwrapRef<typeof import('vue')['defineAsyncComponent']>
     readonly defineComponent: UnwrapRef<typeof import('vue')['defineComponent']>
     readonly defineStore: UnwrapRef<typeof import('pinia')['defineStore']>
+    readonly deleteBookmark: UnwrapRef<typeof import('./composables/bookmarks')['deleteBookmark']>
     readonly deleteNetworkInstance: UnwrapRef<typeof import('./composables/backend')['deleteNetworkInstance']>
     readonly effectScope: UnwrapRef<typeof import('vue')['effectScope']>
     readonly executeVpnTileAction: UnwrapRef<typeof import('./composables/mobile_vpn_tile')['executeVpnTileAction']>
@@ -199,6 +206,7 @@ declare module 'vue' {
     readonly isReadonly: UnwrapRef<typeof import('vue')['isReadonly']>
     readonly isRef: UnwrapRef<typeof import('vue')['isRef']>
     readonly isWebClientConnected: UnwrapRef<typeof import('./composables/backend')['isWebClientConnected']>
+    readonly listBookmarks: UnwrapRef<typeof import('./composables/bookmarks')['listBookmarks']>
     readonly listNetworkInstanceIds: UnwrapRef<typeof import('./composables/backend')['listNetworkInstanceIds']>
     readonly listenGlobalEvents: UnwrapRef<typeof import('./composables/event')['listenGlobalEvents']>
     readonly loadLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['loadLastNetworkInstanceId']>
@@ -234,6 +242,7 @@ declare module 'vue' {
     readonly onUnmounted: UnwrapRef<typeof import('vue')['onUnmounted']>
     readonly onUpdated: UnwrapRef<typeof import('vue')['onUpdated']>
     readonly onWatcherCleanup: UnwrapRef<typeof import('vue')['onWatcherCleanup']>
+    readonly openBookmark: UnwrapRef<typeof import('./composables/bookmarks')['openBookmark']>
     readonly parseNetworkConfig: UnwrapRef<typeof import('./composables/backend')['parseNetworkConfig']>
     readonly prepareVpnService: UnwrapRef<typeof import('./composables/mobile_vpn')['prepareVpnService']>
     readonly provide: UnwrapRef<typeof import('vue')['provide']>
@@ -247,9 +256,11 @@ declare module 'vue' {
     readonly resumeMobileVpn: UnwrapRef<typeof import('./composables/mobile_vpn')['resumeMobileVpn']>
     readonly runNetworkInstance: UnwrapRef<typeof import('./composables/backend')['runNetworkInstance']>
     readonly sampleMobileHealth: UnwrapRef<typeof import('./composables/mobile_health')['sampleMobileHealth']>
+    readonly saveBookmark: UnwrapRef<typeof import('./composables/bookmarks')['saveBookmark']>
     readonly saveLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['saveLastNetworkInstanceId']>
     readonly saveMode: UnwrapRef<typeof import('./composables/mode')['saveMode']>
     readonly saveNetworkConfig: UnwrapRef<typeof import('./composables/backend')['saveNetworkConfig']>
+    readonly selectBookmark: UnwrapRef<typeof import('./composables/bookmarks')['selectBookmark']>
     readonly sendConfigs: UnwrapRef<typeof import('./composables/backend')['sendConfigs']>
     readonly setActivePinia: UnwrapRef<typeof import('pinia')['setActivePinia']>
     readonly setLoggingLevel: UnwrapRef<typeof import('./composables/backend')['setLoggingLevel']>
@@ -289,6 +300,7 @@ declare module 'vue' {
     readonly useSlots: UnwrapRef<typeof import('vue')['useSlots']>
     readonly useTemplateRef: UnwrapRef<typeof import('vue')['useTemplateRef']>
     readonly useTray: UnwrapRef<typeof import('./composables/tray')['useTray']>
+    readonly validateBookmark: UnwrapRef<typeof import('./composables/bookmarks')['validateBookmark']>
     readonly validateConfig: UnwrapRef<typeof import('./composables/backend')['validateConfig']>
     readonly validateConfigServerProfiles: UnwrapRef<typeof import('./composables/config_server_profiles')['validateConfigServerProfiles']>
     readonly watch: UnwrapRef<typeof import('vue')['watch']>

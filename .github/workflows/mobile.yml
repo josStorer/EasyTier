@@ -129,7 +129,7 @@ jobs:
         if: matrix.ARCH == 'aarch64'
         run: |
           pnpm --filter easytier-gui test:mobile-vpn
-          pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts tests/gui-mobile-status.spec.ts
+          pnpm --filter easytier-frontend-lib exec vitest run --config vitest.config.ts tests/gui-config-server.spec.ts tests/gui-mobile-status.spec.ts tests/gui-bookmarks.spec.ts
           rustc --edition 2024 --test easytier-gui/src-tauri/src/connection_intent.rs -o /tmp/easytier-connection-intent-tests
           /tmp/easytier-connection-intent-tests
           cargo test -p easytier-core --lib mobile_config_pushes_preserve_instances_and_do_not_reenter_the_mutation_lock --locked
@@ -138,6 +138,12 @@ jobs:
         run: |
           cd easytier-gui
           pnpm tauri android build --apk --target "$ARCH" --split-per-abi
+
+      - name: Test bookmark TOTP
+        if: matrix.ARCH == 'aarch64'
+        run: |
+          cd easytier-gui/src-tauri/gen/android
+          ./gradlew :tauri-plugin-vpnservice:testDebugUnitTest --tests com.plugin.vpnservice.BookmarkTotpTest
 
       - name: Collect artifact
         run: |

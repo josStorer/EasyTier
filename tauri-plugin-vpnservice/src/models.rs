@@ -2,6 +2,22 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkPrepareRequest {
+    pub id: String,
+    pub label: String,
+    pub proxy_port: u16,
+    pub existing_window: bool,
+}
+
+#[derive(Deserialize)]
+pub struct BookmarkPrepared {
+    pub resumed: bool,
+    pub url: Option<String>,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PingRequest {

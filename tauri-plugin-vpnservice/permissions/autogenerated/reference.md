@@ -45,6 +45,32 @@ Denies the consume_vpn_tile_action command without any pre-configured scope.
 <tr>
 <td>
 
+`vpnservice:allow-delete-bookmark`
+
+</td>
+<td>
+
+Enables the delete_bookmark command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-delete-bookmark`
+
+</td>
+<td>
+
+Denies the delete_bookmark command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vpnservice:allow-get-vpn-status`
 
 </td>
@@ -64,6 +90,32 @@ Enables the get_vpn_status command without any pre-configured scope.
 <td>
 
 Denies the get_vpn_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-list-bookmarks`
+
+</td>
+<td>
+
+Enables the list_bookmarks command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-list-bookmarks`
+
+</td>
+<td>
+
+Denies the list_bookmarks command without any pre-configured scope.
 
 </td>
 </tr>
@@ -168,6 +220,58 @@ Enables the register_listener command without any pre-configured scope.
 <td>
 
 Denies the register_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-save-bookmark`
+
+</td>
+<td>
+
+Enables the save_bookmark command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-save-bookmark`
+
+</td>
+<td>
+
+Denies the save_bookmark command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-select-bookmark`
+
+</td>
+<td>
+
+Enables the select_bookmark command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-select-bookmark`
+
+</td>
+<td>
+
+Denies the select_bookmark command without any pre-configured scope.
 
 </td>
 </tr>

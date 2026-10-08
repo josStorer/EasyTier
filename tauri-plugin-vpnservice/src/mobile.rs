@@ -28,6 +28,40 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct Vpnservice<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> Vpnservice<R> {
+    pub fn prepare_bookmark(
+        &self,
+        id: String,
+        label: String,
+        proxy_port: u16,
+        existing_window: bool,
+    ) -> crate::Result<BookmarkPrepared> {
+        self.0
+            .run_mobile_plugin(
+                "prepareBookmark",
+                BookmarkPrepareRequest {
+                    id,
+                    label,
+                    proxy_port,
+                    existing_window,
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn cancel_bookmark(&self, label: String) -> crate::Result<Status> {
+        self.0
+            .run_mobile_plugin(
+                "cancelBookmark",
+                BookmarkPrepareRequest {
+                    id: String::new(),
+                    label,
+                    proxy_port: 0,
+                    existing_window: false,
+                },
+            )
+            .map_err(Into::into)
+    }
+
     pub fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
         self.0
             .run_mobile_plugin("ping", payload)

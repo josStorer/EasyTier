@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bookmarks;
 mod connection_intent;
 mod elevate;
 
@@ -1850,38 +1851,48 @@ pub fn run_gui() -> std::process::ExitCode {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            parse_network_config,
-            generate_network_config,
-            run_network_instance,
-            collect_network_info,
-            get_vpn_portal_info,
-            patch_vpn_portal_clients,
-            set_logging_level,
-            set_tun_fd,
-            easytier_version,
-            set_dock_visibility,
-            list_network_instance_ids,
-            remove_network_instance,
-            update_network_config_state,
-            save_network_config,
-            validate_config,
-            get_config,
-            load_configs,
-            get_network_metas,
-            init_service,
-            set_service_status,
-            get_service_status,
-            init_rpc_connection,
-            is_client_running,
-            init_web_client,
-            mobile_connection_enabled,
-            set_mobile_connection_enabled,
-            restart_mobile_network,
-            log_mobile_vpn_diagnostic,
-            is_web_client_connected,
-            get_log_dir_path,
-        ])
+        .invoke_handler(|invoke| {
+            // External bookmark pages never receive application management IPC,
+            // including if a site redirects to the app's local origin.
+            if invoke.message.webview_ref().label().starts_with("bookmark-") {
+                invoke.resolver.reject("Application commands are unavailable in bookmark pages");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                bookmarks::open_bookmark,
+                parse_network_config,
+                generate_network_config,
+                run_network_instance,
+                collect_network_info,
+                get_vpn_portal_info,
+                patch_vpn_portal_clients,
+                set_logging_level,
+                set_tun_fd,
+                easytier_version,
+                set_dock_visibility,
+                list_network_instance_ids,
+                remove_network_instance,
+                update_network_config_state,
+                save_network_config,
+                validate_config,
+                get_config,
+                load_configs,
+                get_network_metas,
+                init_service,
+                set_service_status,
+                get_service_status,
+                init_rpc_connection,
+                is_client_running,
+                init_web_client,
+                mobile_connection_enabled,
+                set_mobile_connection_enabled,
+                restart_mobile_network,
+                log_mobile_vpn_diagnostic,
+                is_web_client_connected,
+                get_log_dir_path,
+            ];
+            handler(invoke)
+        })
         .on_window_event(|_win, event| match event {
             #[cfg(not(target_os = "android"))]
             tauri::WindowEvent::CloseRequested { api, .. } => {

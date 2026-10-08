@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-save-bookmark"
+description = "Enables the save_bookmark command without any pre-configured scope."
+commands.allow = ["save_bookmark"]
+
+[[permission]]
+identifier = "deny-save-bookmark"
+description = "Denies the save_bookmark command without any pre-configured scope."
+commands.deny = ["save_bookmark"]

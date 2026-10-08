@@ -16,6 +16,9 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import android.webkit.WebView
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
 
 @InvokeArg
 class PingArgs {
@@ -34,6 +37,73 @@ class StartVpnArgs {
 
 @TauriPlugin
 class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
+    @Command
+    fun listBookmarks(invoke: Invoke) {
+        try { invoke.resolve(BookmarkStore(activity).snapshot()) }
+        catch (_: Exception) { invoke.reject("Cannot decrypt or read saved bookmarks") }
+    }
+
+    @Command
+    fun saveBookmark(invoke: Invoke) {
+        try {
+            BookmarkStore(activity).save(invoke.parseArgs(BookmarkSaveArgs::class.java))
+            invoke.resolve(BookmarkStore(activity).snapshot())
+        } catch (_: Exception) { invoke.reject("Invalid bookmark settings or unable to save; check URL, selector and 2FA key") }
+    }
+
+    @Command
+    fun selectBookmark(invoke: Invoke) {
+        try {
+            BookmarkStore(activity).select(invoke.parseArgs(BookmarkIdArgs::class.java).id)
+            invoke.resolve(BookmarkStore(activity).snapshot())
+        } catch (_: Exception) { invoke.reject("Could not select bookmark") }
+    }
+
+    @Command
+    fun deleteBookmark(invoke: Invoke) {
+        try {
+            val id = invoke.parseArgs(BookmarkIdArgs::class.java).id
+            require(!BookmarkWindows.isOpen(id)) { "Close the page first" }
+            BookmarkStore(activity).delete(id)
+            invoke.resolve(BookmarkStore(activity).snapshot())
+        } catch (_: Exception) { invoke.reject("Close the bookmark page before deleting it") }
+    }
+
+    @Command
+    fun prepareBookmark(invoke: Invoke) {
+        val args = invoke.parseArgs(BookmarkPrepareArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                val item = BookmarkStore(activity).get(args.id)
+                if (BookmarkWindows.resume(args.id)) {
+                    invoke.resolve(JSObject().apply { put("resumed", true) })
+                    return@runOnUiThread
+                }
+                if (args.existingWindow) {
+                    invoke.reject("Page is still opening; try Continue again shortly")
+                    return@runOnUiThread
+                }
+                require(WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
+                BookmarkWindows.prepare(args.label, item)
+                val proxy = ProxyConfig.Builder().addProxyRule("socks://127.0.0.1:${args.proxyPort}").build()
+                ProxyController.getInstance().setProxyOverride(proxy, { command -> activity.runOnUiThread(command) }) {
+                    invoke.resolve(JSObject().apply {
+                        put("resumed", false); put("url", item.getString("url")); put("name", item.getString("name"))
+                    })
+                }
+            } catch (_: Exception) {
+                if (!args.existingWindow) BookmarkWindows.cancel(args.label)
+                invoke.reject("Could not prepare page; update Android System WebView and retry")
+            }
+        }
+    }
+
+    @Command
+    fun cancelBookmark(invoke: Invoke) {
+        BookmarkWindows.cancel(invoke.parseArgs(BookmarkPrepareArgs::class.java).label)
+        invoke.resolve(JSObject())
+    }
+
     companion object {
         @Volatile
         private var tileActionCallback: (String) -> Boolean = { false }
@@ -81,12 +151,15 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         connectivity.registerDefaultNetworkCallback(networkCallback)
     }
 
-    override fun onDestroy() {
+    override fun onDestroy(destroyed: androidx.appcompat.app.AppCompatActivity) {
+        // Tauri forwards every activity's destruction to shared plugins.
+        // Closing a bookmark must not unregister the main VPN's network watcher.
+        if (destroyed !== activity) return
         connectivity.unregisterNetworkCallback(networkCallback)
         if (tileActionCallback === tileActionHandler) {
             tileActionCallback = { false }
         }
-        super.onDestroy()
+        super.onDestroy(destroyed)
     }
 
     @Command

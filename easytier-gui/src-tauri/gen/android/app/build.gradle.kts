@@ -48,7 +48,8 @@ android {
     compileSdk = 34
     namespace = "com.kkrainbow.easytier"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // User-saved LAN services may intentionally use plain HTTP.
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.kkrainbow.easytier"
         minSdk = 24
         targetSdk = 34
