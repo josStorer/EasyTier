@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createI18n } from 'vue-i18n'
 import PrimeVue from 'primevue/config'
 import source from '../../../tauri-plugin-vpnservice/android/src/main/assets/bookmark_dom.js?raw'
+import bookmarkRust from '../../../easytier-gui/src-tauri/src/bookmarks.rs?raw'
+import androidManifest from '../../../easytier-gui/src-tauri/gen/android/app/src/main/AndroidManifest.xml?raw'
+import bookmarkActivity from '../../../easytier-gui/src-tauri/gen/android/app/src/main/java/com/kkrainbow/easytier/BookmarkActivity.kt?raw'
+import mainActivity from '../../../easytier-gui/src-tauri/gen/android/app/src/main/java/com/kkrainbow/easytier/MainActivity.kt?raw'
 import Bookmarks from '../../../easytier-gui/src/components/Bookmarks.vue'
 import { preventAppContextMenu } from '../../../easytier-gui/src/modules/context_menu'
 import { validateBookmark, type BookmarkEdit, type BookmarkSnapshot } from '../../../easytier-gui/src/composables/bookmarks'
@@ -35,6 +39,40 @@ beforeEach(() => {
 })
 
 describe('favorite addresses UI', () => {
+  it('uses package-relative Android activity names required by Tao', () => {
+    // Tao prefixes the package when loading activity_name and compares the
+    // parent against getLocalClassName(). Fully qualified names compile but fail.
+    const activity = bookmarkRust.match(/\.activity_name\("([^"]+)"\)/)?.[1]
+    const parent = bookmarkRust.match(/\.created_by_activity_name\("([^"]+)"\)/)?.[1]
+    expect(activity).toBe('BookmarkActivity')
+    expect(parent).toBe('MainActivity')
+    for (const [name, source] of [[activity, bookmarkActivity], [parent, mainActivity]]) {
+      expect(source).toContain(`class ${name} : TauriActivity()`)
+      expect(androidManifest).toContain(`android:name=".${name}"`)
+    }
+  })
+
+  it('shows a launch failure and allows retry instead of reporting an open page', async () => {
+    saved = { selectedId: 'A', items: [
+      { id: 'A', name: 'LAN', url: 'http://192.0.2.1', selector: '', hasSecret: false, autoEnter: false, opened: false },
+    ] }
+    const wrapper = mount(Bookmarks, { attachTo: document.body,
+      global: { plugins: [PrimeVue, createI18n({ legacy: false, locale: 'en', messages: { en: {} } })] } })
+    try {
+      await flushPromises()
+      native.mockRejectedValueOnce('Bookmark activity did not start within 10 seconds; please retry')
+      await wrapper.findAll('button').find(button => button.text() === 'Start')!.trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[role=alert]').text()).toContain('did not start within 10 seconds')
+      expect(wrapper.text()).not.toContain('Continue')
+      const retry = wrapper.findAll('button').find(button => button.text() === 'Start')!
+      expect(retry.attributes('disabled')).toBeUndefined()
+      await retry.trigger('click'); await flushPromises()
+      expect(wrapper.find('[role=alert]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('Continue')
+    } finally { wrapper.unmount() }
+  })
+
   it('allows native edit menus on every bookmark field under the production context-menu policy', async () => {
     document.addEventListener('contextmenu', preventAppContextMenu)
     const wrapper = mount(Bookmarks, { attachTo: document.body,

@@ -8,7 +8,6 @@ pub struct BookmarkPrepareRequest {
     pub id: String,
     pub label: String,
     pub proxy_port: u16,
-    pub existing_window: bool,
 }
 
 #[derive(Deserialize)]

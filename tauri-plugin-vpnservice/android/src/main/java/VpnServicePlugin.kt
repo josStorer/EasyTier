@@ -7,6 +7,10 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.Command
 import app.tauri.annotation.ActivityCallback
@@ -79,20 +83,35 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
                     invoke.resolve(JSObject().apply { put("resumed", true) })
                     return@runOnUiThread
                 }
-                if (args.existingWindow) {
+                if (BookmarkWindows.isOpen(args.id)) {
                     invoke.reject("Page is still opening; try Continue again shortly")
                     return@runOnUiThread
                 }
                 require(WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
                 BookmarkWindows.prepare(args.label, item)
                 val proxy = ProxyConfig.Builder().addProxyRule("socks://127.0.0.1:${args.proxyPort}").build()
+                val handler = Handler(Looper.getMainLooper())
+                var completed = false
+                val timeout = Runnable {
+                    if (!completed) {
+                        completed = true
+                        BookmarkWindows.cancel(args.label)
+                        invoke.reject("WebView proxy setup timed out; please retry")
+                    }
+                }
                 ProxyController.getInstance().setProxyOverride(proxy, { command -> activity.runOnUiThread(command) }) {
+                    if (completed) return@setProxyOverride
+                    completed = true
+                    handler.removeCallbacks(timeout)
+                    Log.i("EasyTierBookmark", "proxy ready: label=${args.label}")
                     invoke.resolve(JSObject().apply {
                         put("resumed", false); put("url", item.getString("url")); put("name", item.getString("name"))
                     })
                 }
-            } catch (_: Exception) {
-                if (!args.existingWindow) BookmarkWindows.cancel(args.label)
+                if (!completed) handler.postDelayed(timeout, 5000)
+            } catch (error: Exception) {
+                BookmarkWindows.cancel(args.label)
+                Log.w("EasyTierBookmark", "prepare failed: label=${args.label} type=${error.javaClass.simpleName}")
                 invoke.reject("Could not prepare page; update Android System WebView and retry")
             }
         }
@@ -100,8 +119,31 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun cancelBookmark(invoke: Invoke) {
-        BookmarkWindows.cancel(invoke.parseArgs(BookmarkPrepareArgs::class.java).label)
-        invoke.resolve(JSObject())
+        val label = invoke.parseArgs(BookmarkPrepareArgs::class.java).label
+        activity.runOnUiThread {
+            BookmarkWindows.cancel(label)
+            invoke.resolve(JSObject())
+        }
+    }
+
+    @Command
+    fun awaitBookmark(invoke: Invoke) {
+        val args = invoke.parseArgs(BookmarkPrepareArgs::class.java)
+        val handler = Handler(Looper.getMainLooper())
+        val deadline = SystemClock.elapsedRealtime() + 10000
+        handler.post(object : Runnable {
+            override fun run() {
+                if (BookmarkWindows.isReady(args.id, args.label)) {
+                    invoke.resolve(JSObject())
+                } else if (!BookmarkWindows.isPending(args.label) || SystemClock.elapsedRealtime() >= deadline) {
+                    BookmarkWindows.cancel(args.label)
+                    Log.w("EasyTierBookmark", "activity startup failed or timed out: label=${args.label}")
+                    invoke.reject("Bookmark activity did not start within 10 seconds; please retry")
+                } else {
+                    handler.postDelayed(this, 100)
+                }
+            }
+        })
     }
 
     companion object {

@@ -33,7 +33,6 @@ impl<R: Runtime> Vpnservice<R> {
         id: String,
         label: String,
         proxy_port: u16,
-        existing_window: bool,
     ) -> crate::Result<BookmarkPrepared> {
         self.0
             .run_mobile_plugin(
@@ -42,7 +41,6 @@ impl<R: Runtime> Vpnservice<R> {
                     id,
                     label,
                     proxy_port,
-                    existing_window,
                 },
             )
             .map_err(Into::into)
@@ -56,7 +54,19 @@ impl<R: Runtime> Vpnservice<R> {
                     id: String::new(),
                     label,
                     proxy_port: 0,
-                    existing_window: false,
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn await_bookmark(&self, id: String, label: String) -> crate::Result<Status> {
+        self.0
+            .run_mobile_plugin(
+                "awaitBookmark",
+                BookmarkPrepareRequest {
+                    id,
+                    label,
+                    proxy_port: 0,
                 },
             )
             .map_err(Into::into)

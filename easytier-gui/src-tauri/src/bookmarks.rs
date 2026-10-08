@@ -27,13 +27,19 @@ pub async fn open_bookmark(window: tauri::WebviewWindow, id: String) -> Result<(
             .await
             .map_err(|_| "Could not start bookmark transport")?;
         let app = window.app_handle();
-        let label = format!("bookmark-{id}");
-        let existing = app.get_webview_window(&label).is_some();
+        // Native activities own the one-page-per-bookmark rule. A failed Tauri
+        // window can outlive its activity, so never reuse a failed window label.
+        let label = format!("bookmark-{id}-{}", uuid::Uuid::new_v4());
+        tracing::info!(bookmark_id = %id, window_label = %label, "bookmark launch requested");
         let prepared = app
             .vpnservice()
-            .prepare_bookmark(id, label.clone(), port, existing)
-            .map_err(|e| e.to_string())?;
+            .prepare_bookmark(id.clone(), label.clone(), port)
+            .map_err(|e| {
+                tracing::warn!(window_label = %label, error = %e, "bookmark preparation failed");
+                e.to_string()
+            })?;
         if prepared.resumed {
+            tracing::info!(bookmark_id = %id, "bookmark activity resumed");
             return Ok(());
         }
         let url = prepared
@@ -49,17 +55,31 @@ pub async fn open_bookmark(window: tauri::WebviewWindow, id: String) -> Result<(
         let result =
             tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(url))
                 .title(prepared.name.as_deref().unwrap_or("Bookmark"))
-                .activity_name("com.kkrainbow.easytier.BookmarkActivity")
-                .created_by_activity_name("com.kkrainbow.easytier.MainActivity")
+                // Tao prefixes the application package and matches the parent
+                // using Activity.getLocalClassName(), not a fully qualified name.
+                .activity_name("BookmarkActivity")
+                .created_by_activity_name("MainActivity")
                 .on_navigation(move |url| {
                     (matches!(url.scheme(), "http" | "https") && url.origin() != gui_origin)
                         || url.as_str() == "about:blank"
                 })
                 .build();
-        if let Err(error) = result {
-            let _ = app.vpnservice().cancel_bookmark(label);
+        let page = match result {
+            Ok(page) => page,
+            Err(error) => {
+                let _ = app.vpnservice().cancel_bookmark(label.clone());
+                tracing::warn!(window_label = %label, error = %error, "bookmark window creation failed");
+                return Err(error.to_string());
+            }
+        };
+        // build() returning is not proof that the Android WebView attached.
+        if let Err(error) = app.vpnservice().await_bookmark(id, label.clone()) {
+            let _ = app.vpnservice().cancel_bookmark(label.clone());
+            let _ = page.destroy();
+            tracing::warn!(window_label = %label, error = %error, "bookmark activity failed to become ready");
             return Err(error.to_string());
         }
+        tracing::info!(window_label = %label, "bookmark activity ready");
         Ok(())
     }
     #[cfg(not(target_os = "android"))]

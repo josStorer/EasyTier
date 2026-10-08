@@ -21,5 +21,4 @@ class BookmarkPrepareArgs {
     var id: String = ""
     var label: String = ""
     var proxyPort: Int = 0
-    var existingWindow: Boolean = false
 }
